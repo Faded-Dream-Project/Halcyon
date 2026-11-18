@@ -1008,6 +1008,16 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         goto done;
                     }
                     mat.texture = (int)tex;
+                } else if (strcmp(mkey, "filter") == 0) {
+                    hal_u32 f2 = 0;
+                    if (!parse_u32(&p, &f2) || !expect_end_of_line(&p)) {
+                        set_err(err, err_cap,
+                                "line %d: filter wants 0 or 1", mline);
+                        result = HAL_ERR_INVALID_ARGUMENT;
+                        free(mkey);
+                        goto done;
+                    }
+                    mat.filter = (int)f2;
                 } else if (strcmp(mkey, "end") == 0) {
                     done_block = true;
                 } else {

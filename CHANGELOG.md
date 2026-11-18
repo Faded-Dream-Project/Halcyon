@@ -6,6 +6,19 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — viewport texture sampling (2026-11-18, session 3)
+
+- Perspective-correct textured triangles in the CPU rasterizer
+  (uv/w + 1/w with a per-pixel divide; intensities too on this path).
+- Nearest and bilinear repeat-wrap sampling; per-material filter;
+  a path-keyed texture cache (platform image loader); per-corner UVs
+  survive near-clipping. Edit > Load Texture / Toggle Filter; the
+  filter persists in the project format.
+- Fixed (with regressions): the rasterizer's barycentric edge
+  functions had bound to the wrong vertices since M3 (a cyclic
+  shift — invisible for flat shading and constant-z triangles, wrong
+  for smooth shading, depth, and UVs).
+
 ### Added — glTF skins: export and import (2026-11-18, session 3)
 
 - Skinned meshes export as full glTF skins: joint node hierarchies,

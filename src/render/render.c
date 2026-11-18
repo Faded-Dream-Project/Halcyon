@@ -6,6 +6,7 @@
 
 #include "../core/armature.h"
 #include "../core/material.h"
+#include "../platform/platform.h"
 #include "raster.h"
 
 #include <math.h>
@@ -33,6 +34,7 @@ typedef struct clip_vertex {
     hal_vec4f pos;
     hal_vec3f normal; /* world normal for shading        */
     hal_f32 intensity;
+    hal_vec2f uv;     /* texture coordinate (textured)   */
 } clip_vertex;
 
 static size_t clip_near(clip_vertex *poly, size_t n, size_t cap) {
@@ -61,6 +63,10 @@ static size_t clip_near(clip_vertex *poly, size_t n, size_t cap) {
                 v.normal = hal_vec3f_lerp(cur.normal, nxt.normal, t);
                 v.intensity =
                     cur.intensity + (nxt.intensity - cur.intensity) * t;
+                v.uv = (hal_vec2f){
+                    cur.uv.x + (nxt.uv.x - cur.uv.x) * t,
+                    cur.uv.y + (nxt.uv.y - cur.uv.y) * t
+                };
                 out[m++] = v;
             }
         } else if (d_nxt >= 0.0f && m < cap) {
@@ -154,7 +160,9 @@ static void render_mesh_solid(hal_raster *raster, hal_mesh *mesh,
                               hal_mat4f world, hal_mat4f view_proj,
                               hal_vec3f eye, bool smooth, hal_f32 ox,
                               hal_f32 oy, hal_f32 vw, hal_f32 vh,
-                              hal_color base) {
+                              hal_color base,
+                              const hal_texture *tex,
+                              hal_tex_filter tex_filter) {
     const hal_vec3f *fn = hal_mesh_face_normals(mesh);
     const hal_vec3f *vn = smooth ? hal_mesh_vert_normals(mesh) : NULL;
     if (!fn || (smooth && !vn))
@@ -200,6 +208,7 @@ static void render_mesh_solid(hal_raster *raster, hal_mesh *mesh,
             size_t idx[3] = { mesh->loops[start],
                               mesh->loops[start + i],
                               mesh->loops[start + i + 1] };
+            size_t loop_idx[3] = { start, start + i, start + i + 1 };
             for (int k = 0; k < 3; k++) {
                 hal_vec3f wp = hal_mat4f_transform_point(
                     world, mesh->verts[idx[k]]);
@@ -207,6 +216,9 @@ static void render_mesh_solid(hal_raster *raster, hal_mesh *mesh,
                     view_proj, hal_vec4f_make(wp.x, wp.y, wp.z, 1.0f));
                 poly[k].normal = fn[f];
                 poly[k].intensity = flat_i;
+                poly[k].uv = tex && mesh->uvs
+                                 ? mesh->uvs[loop_idx[k]]
+                                 : (hal_vec2f){ 0, 0 };
                 if (vn) {
                     hal_vec3f n =
                         hal_vec3f_normalize(hal_mat4f_transform_dir(
@@ -231,18 +243,36 @@ static void render_mesh_solid(hal_raster *raster, hal_mesh *mesh,
                     continue;
             }
 
-            for (size_t t = clipped ? 1 : 1; t + 1 < n; t++) {
+            for (size_t t = 1; t + 1 < n; t++) {
                 hal_vec3f s0 = to_screen(poly[0].pos, 1.0f);
                 hal_vec3f s1 = to_screen(poly[t].pos, 1.0f);
                 hal_vec3f s2 = to_screen(poly[t + 1].pos, 1.0f);
-                hal_raster_triangle(
-                    raster,
-                    hal_vec3f_make(s0.x * vw + ox, s0.y * vh + oy, s0.z),
-                    poly[0].intensity,
-                    hal_vec3f_make(s1.x * vw + ox, s1.y * vh + oy, s1.z),
-                    poly[t].intensity,
-                    hal_vec3f_make(s2.x * vw + ox, s2.y * vh + oy, s2.z),
-                    poly[t + 1].intensity, shaded);
+                if (tex) {
+                    hal_raster_triangle_uv(
+                        raster,
+                        hal_vec3f_make(s0.x * vw + ox, s0.y * vh + oy,
+                                       s0.z),
+                        poly[0].intensity, poly[0].pos.w, poly[0].uv,
+                        hal_vec3f_make(s1.x * vw + ox, s1.y * vh + oy,
+                                       s1.z),
+                        poly[t].intensity, poly[t].pos.w, poly[t].uv,
+                        hal_vec3f_make(s2.x * vw + ox, s2.y * vh + oy,
+                                       s2.z),
+                        poly[t + 1].intensity, poly[t + 1].pos.w,
+                        poly[t + 1].uv, base, tex, tex_filter);
+                } else {
+                    hal_raster_triangle(
+                        raster,
+                        hal_vec3f_make(s0.x * vw + ox, s0.y * vh + oy,
+                                       s0.z),
+                        poly[0].intensity,
+                        hal_vec3f_make(s1.x * vw + ox, s1.y * vh + oy,
+                                       s1.z),
+                        poly[t].intensity,
+                        hal_vec3f_make(s2.x * vw + ox, s2.y * vh + oy,
+                                       s2.z),
+                        poly[t + 1].intensity, shaded);
+                }
             }
         }
     }
@@ -264,8 +294,10 @@ static void render_mesh_wire(hal_raster *raster, hal_mesh *mesh,
         hal_vec4f cb = hal_mat4f_mul_vec4(
             view_proj, hal_vec4f_make(wb.x, wb.y, wb.z, 1.0f));
 
-        clip_vertex line[CLIP_MAX] = { { ca, hal_vec3f_zero(), 1.0f },
-                                     { cb, hal_vec3f_zero(), 1.0f } };
+        clip_vertex line[CLIP_MAX] = {
+            { ca, hal_vec3f_zero(), 1.0f, { 0, 0 } },
+            { cb, hal_vec3f_zero(), 1.0f, { 0, 0 } }
+        };
         size_t n = clip_near(line, 2, CLIP_MAX);
         if (n != 2)
             continue;
@@ -306,6 +338,86 @@ static void render_gizmo(hal_canvas *canvas, hal_rectf viewport,
 }
 
 /* ---- The view ---- */
+
+/* ---- Texture cache ---- */
+
+typedef struct cache_entry {
+    char *path;
+    hal_texture tex;   /* pixels owned here                     */
+    hal_u32 *pixels;
+    struct cache_entry *next;
+} cache_entry;
+
+struct hal_texture_cache {
+    cache_entry *head;
+};
+
+hal_texture_cache *hal_texture_cache_create(void) {
+    return calloc(1, sizeof(hal_texture_cache));
+}
+
+void hal_texture_cache_destroy(hal_texture_cache *cache) {
+    if (!cache)
+        return;
+    cache_entry *e = cache->head;
+    while (e) {
+        cache_entry *next = e->next;
+        free(e->path);
+        free(e->pixels);
+        free(e);
+        e = next;
+    }
+    free(cache);
+}
+
+const hal_texture *hal_texture_cache_get(hal_texture_cache *cache,
+                                         const char *path) {
+    if (!cache || !path || !path[0])
+        return NULL;
+    for (cache_entry *e = cache->head; e; e = e->next)
+        if (strcmp(e->path, path) == 0)
+            return &e->tex;
+
+    hal_surface *surf = NULL;
+    if (!hal_ok(hal_surface_from_image(path, &surf)))
+        return NULL;
+    hal_surface_info info;
+    if (!hal_ok(hal_surface_info_get(surf, &info)) || !info.pixels ||
+        info.width <= 0 || info.height <= 0) {
+        hal_surface_destroy(surf);
+        return NULL;
+    }
+    hal_u32 *pixels =
+        malloc((size_t)info.width * (size_t)info.height *
+               sizeof(hal_u32));
+    cache_entry *e = malloc(sizeof(*e));
+    if (!pixels || !e) {
+        free(pixels);
+        free(e);
+        hal_surface_destroy(surf);
+        return NULL;
+    }
+    for (hal_i32 y = 0; y < info.height; y++)
+        memcpy(pixels + (size_t)y * (size_t)info.width,
+               info.pixels + (size_t)y * (size_t)info.stride,
+               (size_t)info.width * sizeof(hal_u32));
+    hal_surface_destroy(surf);
+
+    e->path = malloc(strlen(path) + 1);
+    if (!e->path) {
+        free(pixels);
+        free(e);
+        return NULL;
+    }
+    strcpy(e->path, path);
+    e->pixels = pixels;
+    e->tex.w = info.width;
+    e->tex.h = info.height;
+    e->tex.pixels = pixels;
+    e->next = cache->head;
+    cache->head = e;
+    return &e->tex;
+}
 
 /* The object's shaded base color: its material's base color (plus an
  * emissive lift), or the theme default when unassigned. */
@@ -424,10 +536,26 @@ void hal_render_view(hal_raster *raster, hal_scene *scene,
                              ox, oy, vw, vh,
                              object_base_color(scene, obj, opts->object));
         } else {
+            /* The material's texture, if any (through the cache). */
+            const hal_texture *tex = NULL;
+            hal_tex_filter tex_filter = HAL_TEX_BILINEAR;
+            if (opts->textures && obj->material >= 0) {
+                hal_material *mat =
+                    hal_scene_material(scene, obj->material);
+                if (mat && mat->texture >= 0) {
+                    const char *ipath =
+                        hal_scene_image(scene, mat->texture);
+                    tex = hal_texture_cache_get(opts->textures, ipath);
+                    tex_filter = mat->filter
+                                     ? HAL_TEX_BILINEAR
+                                     : HAL_TEX_NEAREST;
+                }
+            }
             render_mesh_solid(raster, &render_mesh_src, world, view_proj,
                               hal_camera_eye(cam), obj->smooth_shading,
                               ox, oy, vw, vh,
-                              object_base_color(scene, obj, opts->object));
+                              object_base_color(scene, obj, opts->object),
+                              tex, tex_filter);
         }
         free(posed_verts);
     }

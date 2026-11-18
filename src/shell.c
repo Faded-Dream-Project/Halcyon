@@ -15,6 +15,7 @@
 #include "render/pick.h"
 #include "render/preview.h"
 #include "render/raster.h"
+#include "render/raster.h"
 
 #include <math.h>
 #include <stdarg.h>
@@ -88,6 +89,9 @@ struct hal_app {
 
     /* Preview rendering: which Render menu item opened the dialog. */
     int render_kind;
+
+    /* Material textures decode through this cache (owned). */
+    hal_texture_cache *textures;
 
     /* Animation: the active clip, the playhead, playback. */
     int active_clip;        /* -1 none                            */
@@ -546,6 +550,44 @@ static void batch_done(char *path, void *user) {
     free(path);
 }
 
+/* Texture load completion: an image for the selected object's
+ * material (a material is created when the object has none). */
+static void tex_done(char *path, void *user) {
+    hal_app *app = user;
+    if (!path) {
+        set_status(app, "Texture load cancelled");
+        return;
+    }
+    hal_object_id sel = hal_scene_selected(app->scene);
+    hal_object *obj = hal_scene_object(app->scene, sel);
+    if (!obj || !obj->mesh) {
+        free(path);
+        return;
+    }
+    int img = hal_scene_image_add(app->scene, path);
+    if (img < 0) {
+        set_status(app, "Texture: out of memory");
+        free(path);
+        return;
+    }
+    if (obj->material < 0) {
+        hal_material mat = hal_material_default();
+        snprintf(mat.name, sizeof(mat.name), "Material %zu",
+                 hal_scene_material_count(app->scene));
+        obj->material = hal_scene_material_add(app->scene, &mat);
+    }
+    hal_material *mat = hal_scene_material(app->scene, obj->material);
+    if (mat)
+        mat->texture = img;
+    /* Warm the cache; a failed decode reports immediately. */
+    if (hal_texture_cache_get(app->textures, path))
+        set_status(app, "Texture: %s", path);
+    else
+        set_status(app, "Texture: cannot decode %s", path);
+    app->dirty = true;
+    free(path);
+}
+
 /* ---- Preview renders ---- */
 
 static void render_done(char *path, void *user) {
@@ -728,6 +770,10 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, edit, "Unwrap Box", NULL, menu_action, app);
     hal_menu_item_add(bar, edit, "Unwrap Smart (lite)", NULL, menu_action, app);
     hal_menu_item_add(bar, edit, "New Material", NULL, menu_action, app);
+    hal_menu_item_add(bar, edit, "Load Texture...", NULL, menu_action,
+                      app);
+    hal_menu_item_add(bar, edit, "Toggle Texture Filter", NULL,
+                      menu_action, app);
     hal_menu_item_add(bar, edit, NULL, NULL, NULL, NULL);
     hal_menu_item_add(bar, edit, "Origin to BBox Center", NULL,
                       menu_action, app);
@@ -1092,21 +1138,7 @@ static void menu_action(hal_widget *menubar, int menu, int item,
             }
             break;
         }
-        case 25: {
-            hal_object *obj =
-                hal_scene_object(app->scene, app->edit_obj);
-            if (obj && obj->mesh)
-                hal_mesh_select_all(obj->mesh, true);
-            break;
-        }
-        case 26: {
-            hal_object *obj =
-                hal_scene_object(app->scene, app->edit_obj);
-            if (obj && obj->mesh)
-                hal_mesh_select_all(obj->mesh, false);
-            break;
-        }
-        case 28: {
+        case 34: {
             /* Bind: the selected mesh skins to the selected
              * armature. */
             hal_object_id mesh_id = hal_scene_selected(app->scene);
@@ -1131,7 +1163,7 @@ static void menu_action(hal_widget *menubar, int menu, int item,
             }
             break;
         }
-        case 29: {
+        case 35: {
             /* Add a child bone to the selected bone of the posed
              * armature. */
             hal_object *arm_obj =
@@ -1163,7 +1195,7 @@ static void menu_action(hal_widget *menubar, int menu, int item,
             app->dirty = true;
             break;
         }
-        case 30: {
+        case 36: {
             /* IK: the selected bone (tip) solves toward the mouse
              * ray at the tip's height plane. */
             hal_object *arm_obj =
@@ -1225,7 +1257,36 @@ static void menu_action(hal_widget *menubar, int menu, int item,
             app->dirty = true;
             break;
         }
-        case 31: {
+        case 25: { /* Load Texture for the selected object's material */
+            hal_object_id sel = hal_scene_selected(app->scene);
+            hal_object *obj = hal_scene_object(app->scene, sel);
+            if (!obj || !obj->mesh) {
+                set_status(app, "Load Texture: select a mesh object");
+                break;
+            }
+            if (hal_ok(hal_dialog_open_file(
+                    app->platform, "Choose a texture image",
+                    "*.png;*.jpg;*.jpeg;*.bmp", tex_done, app,
+                    app->window)))
+                set_status(app, "Choose an image...");
+            break;
+        }
+        case 26: {
+            hal_object *obj =
+                hal_scene_object(app->scene,
+                                 hal_scene_selected(app->scene));
+            if (obj && obj->material >= 0) {
+                hal_material *mat =
+                    hal_scene_material(app->scene, obj->material);
+                if (mat) {
+                    mat->filter = !mat->filter;
+                    set_status(app, "Texture filter: %s",
+                               mat->filter ? "bilinear" : "nearest");
+                }
+            }
+            break;
+        }
+        case 28: {
             /* Origin to bbox center: shift verts, compensate the
              * location so the world geometry stays put. */
             hal_object_id sel = hal_scene_selected(app->scene);
@@ -1248,7 +1309,7 @@ static void menu_action(hal_widget *menubar, int menu, int item,
             }
             break;
         }
-        case 32: {
+        case 29: {
             hal_object_id sel = hal_scene_selected(app->scene);
             hal_object *obj = hal_scene_object(app->scene, sel);
             if (obj) {
@@ -1257,6 +1318,20 @@ static void menu_action(hal_widget *menubar, int menu, int item,
                 set_status(app, "Origin at the world origin");
                 app->dirty = true;
             }
+            break;
+        }
+        case 31: {
+            hal_object *obj =
+                hal_scene_object(app->scene, app->edit_obj);
+            if (obj && obj->mesh)
+                hal_mesh_select_all(obj->mesh, true);
+            break;
+        }
+        case 32: {
+            hal_object *obj =
+                hal_scene_object(app->scene, app->edit_obj);
+            if (obj && obj->mesh)
+                hal_mesh_select_all(obj->mesh, false);
             break;
         }
         default:
@@ -1471,6 +1546,7 @@ void hal_app_destroy(hal_app *app) {
     hal_ui_destroy(app->ui);
     hal_autosave_destroy(app->autosave);
     hal_undo_stack_destroy(app->undo);
+    hal_texture_cache_destroy(app->textures);
     hal_scene_destroy(app->scene);
     free(app);
 }
@@ -2101,10 +2177,10 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
             return true;
         case 30: /* A */
             if (event->key.modifiers & HAL_MOD_ALT) {
-                menu_action(NULL, 1, 26, app);
+                menu_action(NULL, 1, 32, app);
                 set_status(app, "Deselected");
             } else {
-                menu_action(NULL, 1, 25, app);
+                menu_action(NULL, 1, 31, app);
                 set_status(app, "Selected all");
             }
             return true;
@@ -2246,6 +2322,7 @@ static void paint_viewport(hal_app *app, hal_canvas *canvas) {
 
     /* Theme-driven render options; the wireframe toggle rides along. */
     hal_render_opts opts = app->render_opts;
+    opts.textures = app->textures;
     opts.bg = t->colors[HAL_THEME_VIEWPORT_BG];
     opts.grid = t->colors[HAL_THEME_VIEWPORT_GRID];
     opts.object = hal_color_rgb8(0xb9, 0xb2, 0xe0);

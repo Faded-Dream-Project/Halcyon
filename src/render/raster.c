@@ -16,6 +16,14 @@ static hal_u32 color_pack(hal_color c) {
            (hal_u32)(c.b * 255.0f + 0.5f);
 }
 
+/* Unpacks a 0x00RRGGBB pixel to a color (the cache's textures are
+ * opaque; alpha stays 1). */
+static hal_color color_unpack(hal_u32 p) {
+    return hal_color_rgb((hal_f32)((p >> 16) & 0xFFu) / 255.0f,
+                         (hal_f32)((p >> 8) & 0xFFu) / 255.0f,
+                         (hal_f32)(p & 0xFFu) / 255.0f);
+}
+
 /* Multiplies a color by an intensity (lambert shading), clamped. */
 static hal_color color_shade(hal_color c, hal_f32 intensity) {
     if (intensity < 0.0f)
@@ -160,10 +168,16 @@ void hal_raster_triangle(hal_raster *r, hal_vec3f a, hal_f32 ia,
             /* Same winding as the area test: all <= 0 inside. */
             if (w0 > 0.0f || w1 > 0.0f || w2 > 0.0f)
                 continue;
-            hal_f32 b0 = w0 * inv_area, b1 = w1 * inv_area,
-                    b2 = w2 * inv_area;
-            hal_f32 z = b0 * a.z + b1 * b.z + b2 * c.z;
-            hal_f32 intensity = b0 * iaw + b1 * ibw + b2 * icw;
+            /* Edge-function to barycentric binding: E_ab (w0) is the
+             * weight of vertex C, E_bc (w1) of A, E_ca (w2) of B.
+             * (A cyclic misbinding lived here since M3 — invisible
+             * with flat shading and constant-z triangles, wrong for
+             * smooth shading and depth; caught by the UV test.) */
+            hal_f32 b_a = w1 * inv_area, b_b = w2 * inv_area,
+                    b_c = w0 * inv_area;
+            hal_f32 z = b_a * a.z + b_b * b.z + b_c * c.z;
+            hal_f32 intensity =
+                b_a * iaw + b_b * ibw + b_c * icw;
             px(r, x, y, z, color_pack(color_shade(color, intensity)));
         }
     }
@@ -221,4 +235,137 @@ void hal_raster_point(hal_raster *r, hal_f32 x, hal_f32 y, hal_f32 z,
             if (ddx * ddx + ddy * ddy <= radius * radius)
                 px(r, xx, yy, z, packed);
         }
+}
+
+static hal_f32 wrap_coord(hal_f32 t) {
+    t = (hal_f32)fmod((double)t, 1.0);
+    if (t < 0.0f)
+        t += 1.0f;
+    return t;
+}
+
+hal_color hal_texture_sample(const hal_texture *tex, hal_f32 u,
+                             hal_f32 v, hal_tex_filter filter) {
+    if (!tex || !tex->pixels || tex->w <= 0 || tex->h <= 0)
+        return hal_color_rgb(1.0f, 1.0f, 1.0f);
+    u = wrap_coord(u);
+    v = wrap_coord(v);
+
+    if (filter == HAL_TEX_NEAREST) {
+        hal_i32 x = (hal_i32)(u * (hal_f32)tex->w);
+        hal_i32 y = (hal_i32)(v * (hal_f32)tex->h);
+        if (x >= tex->w)
+            x = tex->w - 1;
+        if (y >= tex->h)
+            y = tex->h - 1;
+        return color_unpack(tex->pixels[(size_t)y * (size_t)tex->w +
+                                        (size_t)x]);
+    }
+
+    /* Bilinear: sample centers are at (i + 0.5) / n. */
+    hal_f32 fx = u * (hal_f32)tex->w - 0.5f;
+    hal_f32 fy = v * (hal_f32)tex->h - 0.5f;
+    hal_i32 x0 = (hal_i32)floorf(fx);
+    hal_i32 y0 = (hal_i32)floorf(fy);
+    hal_f32 tx = fx - (hal_f32)x0;
+    hal_f32 ty = fy - (hal_f32)y0;
+    hal_i32 x1 = x0 + 1, y1 = y0 + 1;
+    /* Repeat-wrap the neighbor indices. */
+    hal_i32 wrapx0 = x0 % tex->w; if (wrapx0 < 0) wrapx0 += tex->w;
+    hal_i32 wrapx1 = x1 % tex->w; if (wrapx1 < 0) wrapx1 += tex->w;
+    hal_i32 wrapy0 = y0 % tex->h; if (wrapy0 < 0) wrapy0 += tex->h;
+    hal_i32 wrapy1 = y1 % tex->h; if (wrapy1 < 0) wrapy1 += tex->h;
+    hal_color c00 = color_unpack(
+        tex->pixels[(size_t)wrapy0 * (size_t)tex->w + (size_t)wrapx0]);
+    hal_color c10 = color_unpack(
+        tex->pixels[(size_t)wrapy0 * (size_t)tex->w + (size_t)wrapx1]);
+    hal_color c01 = color_unpack(
+        tex->pixels[(size_t)wrapy1 * (size_t)tex->w + (size_t)wrapx0]);
+    hal_color c11 = color_unpack(
+        tex->pixels[(size_t)wrapy1 * (size_t)tex->w + (size_t)wrapx1]);
+    hal_color c0 = hal_color_rgb(
+        c00.r + (c10.r - c00.r) * tx, c00.g + (c10.g - c00.g) * tx,
+        c00.b + (c10.b - c00.b) * tx);
+    hal_color c1 = hal_color_rgb(
+        c01.r + (c11.r - c01.r) * tx, c01.g + (c11.g - c01.g) * tx,
+        c01.b + (c11.b - c01.b) * tx);
+    return hal_color_rgb(c0.r + (c1.r - c0.r) * ty,
+                         c0.g + (c1.g - c0.g) * ty,
+                         c0.b + (c1.b - c0.b) * ty);
+}
+
+void hal_raster_triangle_uv(hal_raster *r, hal_vec3f a, hal_f32 ia,
+                            hal_f32 wa, hal_vec2f uva, hal_vec3f b,
+                            hal_f32 ib, hal_f32 wb, hal_vec2f uvb,
+                            hal_vec3f c, hal_f32 ic, hal_f32 wc,
+                            hal_vec2f uvc, hal_color color,
+                            const hal_texture *tex,
+                            hal_tex_filter filter) {
+    if (!r || !tex)
+        return;
+    if (wa <= 1e-6f || wb <= 1e-6f || wc <= 1e-6f)
+        return; /* behind the near plane (clip should have caught) */
+
+    hal_f32 ax = a.x - (hal_f32)r->x, ay = a.y - (hal_f32)r->y;
+    hal_f32 bx = b.x - (hal_f32)r->x, by = b.y - (hal_f32)r->y;
+    hal_f32 cx = c.x - (hal_f32)r->x, cy = c.y - (hal_f32)r->y;
+
+    hal_f32 area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+    if (area > -1e-6f && area < 1e-6f)
+        return;
+    if (area > 0.0f)
+        return; /* back-facing */
+
+    /* Perspective-correct attributes: interpolate x/w and 1/w. */
+    hal_f32 ia_w = ia / wa, ib_w = ib / wb, ic_w = ic / wc;
+    hal_f32 ua_w = uva.x / wa, ub_w = uvb.x / wb, uc_w = uvc.x / wc;
+    hal_f32 va_w = uva.y / wa, vb_w = uvb.y / wb, vc_w = uvc.y / wc;
+    hal_f32 one_a = 1.0f / wa, one_b = 1.0f / wb, one_c = 1.0f / wc;
+
+    hal_f32 minx = fminf(ax, fminf(bx, cx));
+    hal_f32 maxx = fmaxf(ax, fmaxf(bx, cx));
+    hal_f32 miny = fminf(ay, fminf(by, cy));
+    hal_f32 maxy = fmaxf(ay, fmaxf(by, cy));
+    hal_i32 y0 = (hal_i32)floorf(miny);
+    hal_i32 y1 = (hal_i32)ceilf(maxy);
+    hal_i32 x0 = (hal_i32)floorf(minx);
+    hal_i32 x1 = (hal_i32)ceilf(maxx);
+    if (y0 < 0) y0 = 0;
+    if (x0 < 0) x0 = 0;
+    if (y1 > r->h) y1 = r->h;
+    if (x1 > r->w) x1 = r->w;
+
+    hal_f32 inv_area = 1.0f / area;
+
+    for (hal_i32 y = y0; y < y1; y++) {
+        for (hal_i32 x = x0; x < x1; x++) {
+            hal_f32 px_ = (hal_f32)x + 0.5f;
+            hal_f32 py_ = (hal_f32)y + 0.5f;
+            hal_f32 w0 = (bx - ax) * (py_ - ay) - (px_ - ax) * (by - ay);
+            hal_f32 w1 = (cx - bx) * (py_ - by) - (px_ - bx) * (cy - by);
+            hal_f32 w2 = (ax - cx) * (py_ - cy) - (px_ - cx) * (ay - cy);
+            if (w0 > 0.0f || w1 > 0.0f || w2 > 0.0f)
+                continue;
+            hal_f32 b_a = w1 * inv_area, b_b = w2 * inv_area,
+                    b_c = w0 * inv_area;
+            hal_f32 z = b_a * a.z + b_b * b.z + b_c * c.z;
+            hal_f32 one_w =
+                b_a * one_a + b_b * one_b + b_c * one_c;
+            if (one_w <= 1e-9f)
+                continue;
+            hal_f32 inv_w = 1.0f / one_w;
+            hal_f32 intensity =
+                (b_a * ia_w + b_b * ib_w + b_c * ic_w) * inv_w;
+            hal_f32 u =
+                (b_a * ua_w + b_b * ub_w + b_c * uc_w) * inv_w;
+            hal_f32 v =
+                (b_a * va_w + b_b * vb_w + b_c * vc_w) * inv_w;
+            hal_color texel =
+                hal_texture_sample(tex, u, v, filter);
+            hal_color shaded = hal_color_rgb(
+                color.r * texel.r, color.g * texel.g,
+                color.b * texel.b);
+            px(r, x, y, z, color_pack(color_shade(shaded, intensity)));
+        }
+    }
 }

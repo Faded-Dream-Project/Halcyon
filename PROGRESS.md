@@ -44,16 +44,20 @@
 
 ## Current state
 
-Session 3 (2026-11-18): item 1 of the release plan DONE — glTF SKIN
-export AND import with a numeric pose-equivalence round-trip test
-(rigged mesh at a different transform than its armature; world-space
-skinned vertices match original vs imported within 1e-4, proving the
-G*IBM semantics equal Halcyon's in-app skinning). Space-aware
-skinning (hal_mesh_apply_pose_ex) fixed a pre-existing bug where mesh
-and armature at different transforms skinned wrong. NEXT: item 2
-(viewport texture sampling: perspective-correct UVs, nearest +
-bilinear), then item 3 (M9 remainder: presets, LODs, collision
-shapes, units/axis export).
+Session 3 (2026-11-18): items 1 AND 2 of the release plan DONE.
+Item 1: glTF skin export + import with the pose-equivalence round
+trip (see the log below). Item 2: viewport texture sampling — a
+perspective-correct textured-triangle raster path (uv/w + 1/w, per-
+pixel divide), nearest and bilinear repeat-wrap sampling, a
+path-keyed texture cache (decoded through the platform's image
+loader), Edit > Load Texture / Toggle Texture Filter, and the
+material filter persisted. The textured-render test checks pixels
+against known geometry (a 2x2 texel checker on an angled quad) and
+EXPOSED A REAL M3-ERA RASTERIZER BUG: barycentric edge functions
+bound to the wrong vertices (cyclic shift) — invisible with flat
+shading/constant-z triangles, wrong for smooth shading, depth and
+UVs; fixed with an isolated regression test. NEXT: item 3 (M9
+remainder: presets, LODs, collision shapes, units/axis export).
 
 ### Implemented and tested
 
@@ -410,6 +414,31 @@ shapes, units/axis export).
   nodes; JOINTS_0/WEIGHTS_0 missing from the primitive attributes;
   the root-joint search required parent < 0.
 
+### Implemented and tested — viewport texture sampling (session 3)
+
+- raster.h/c: hal_raster_triangle_uv — TRUE perspective correction
+  (uv/w and 1/w interpolate affinely in screen space, divide per
+  pixel; intensity too on this path; the plain triangle stays affine
+  and is now documented as such); hal_texture (borrowed packed rows)
+  + hal_texture_sample with REPEAT wrapping, exact nearest and
+  bilinear.
+- render.h/c: hal_texture_cache (paths -> decoded 0x00RRGGBB rows,
+  owned by the app, loads through the platform's image loader);
+  hal_render_opts.textures; per-corner UVs ride clip_vertex through
+  near-clipping (lerped with the intensity); materials with textures
+  render modulated (base color x texel x lambert).
+- material: per-material `filter` (nearest/bilinear, default
+  bilinear), persisted in the project format. Shell: Edit > Load
+  Texture... (image picker -> scene image + the object's material, a
+  material created when none), Toggle Texture Filter.
+- Tests (test_material, 846 checks total): textured render against
+  known geometry (2x2 texel checker on a planar-unwrapped plane at an
+  angle; the pixel at each projected world point shows that point's
+  own texel — affine interpolation would fail this), bilinear center
+  blend, and the isolated raster regression (screen-space triangle,
+  exact texels, plus a mixed-clip-w case with the perspective-correct
+  uv computed by hand — affine picks the wrong texel).
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -463,6 +492,14 @@ shapes, units/axis export).
 
 ## Log
 
+- **2026-11-18 — session 3, item 2: viewport texture sampling.**
+  Perspective-correct textured raster path (uv/w + 1/w), nearest +
+  bilinear repeat sampling, app-owned texture cache, material filter
+  setting, Load Texture UI. Fixed (with regressions): the M3-era
+  CYCLIC BARYCENTRIC MISBINDING in the rasterizer (wrong smooth
+  shading, depth and UV interpolation); the plain triangle's
+  "perspective-correct" comment was aspirational — it is affine and
+  now documented. 2086 headless checks total (846 in test_material).
 - **2026-11-18 — session 3, item 1: glTF skins.** Skin export (joint
   nodes, IBMs, JOINTS_0/WEIGHTS_0, bone animation) + import with a
   numeric pose-equivalence round trip; space-aware skinning fixed a

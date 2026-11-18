@@ -43,6 +43,7 @@ typedef struct hal_material {
     hal_vec3f emissive;      /* linear color                   */
     hal_f32 emissive_strength;
     int texture;             /* scene image index, -1 = none   */
+    int filter;              /* 0 nearest, 1 bilinear          */
 } hal_material;
 
 /* A neutral default (white, non-metal, half-rough). */

@@ -19,6 +19,7 @@ hal_material hal_material_default(void) {
     m.emissive = hal_vec3f_zero();
     m.emissive_strength = 0.0f;
     m.texture = -1;
+    m.filter = 1; /* bilinear */
     return m;
 }
 

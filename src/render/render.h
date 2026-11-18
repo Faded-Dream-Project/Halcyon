@@ -28,6 +28,18 @@ typedef enum hal_shading {
 } hal_shading;
 
 /* Viewport render options. */
+/* A loaded texture image cache: paths -> decoded 0x00RRGGBB rows.
+ * OWNED by the application (loads happen on first use; entries stay
+ * for the cache's lifetime). */
+typedef struct hal_texture_cache hal_texture_cache;
+
+hal_texture_cache *hal_texture_cache_create(void);
+void hal_texture_cache_destroy(hal_texture_cache *cache);
+/* Returns NULL when the path is NULL/empty or the image cannot be
+ * loaded (the renderer falls back to the plain untextured path). */
+const hal_texture *hal_texture_cache_get(hal_texture_cache *cache,
+                                         const char *path);
+
 typedef struct hal_render_opts {
     hal_shading shading;
     hal_color bg;         /* theme viewport_bg        */
@@ -35,6 +47,7 @@ typedef struct hal_render_opts {
     hal_color object;     /* default object color     */
     bool draw_grid;
     bool draw_gizmo;
+    hal_texture_cache *textures; /* materials sample through this */
 } hal_render_opts;
 
 hal_render_opts hal_render_opts_default(void);

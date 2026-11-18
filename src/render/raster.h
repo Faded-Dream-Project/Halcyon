@@ -46,11 +46,43 @@ void hal_raster_clear(hal_raster *r, hal_color color);
 
 /* A screen-space triangle. p* are physical-pixel coordinates in the
  * CANVAS space (not region-local); z* are NDC depths; i* are shading
- * intensities (0..1) interpolated perspective-correctly. Back faces
+ * intensities (0..1, interpolated AFFINELY — fine for flat shading;
+ * use the _uv variant for true perspective correction). Back faces
  * (clockwise in canvas space, y-down) are culled. */
 void hal_raster_triangle(hal_raster *r, hal_vec3f a, hal_f32 ia,
                          hal_vec3f b, hal_f32 ib, hal_vec3f c, hal_f32 ic,
                          hal_color color);
+
+/* A CPU-side texture image: packed 0xAARRGGBB rows (canvas layout),
+ * no stride padding. `pixels` is BORROWED (the cache owns it). */
+typedef struct hal_texture {
+    hal_i32 w, h;
+    const hal_u32 *pixels;
+} hal_texture;
+
+/* How textured triangles filter texels. */
+typedef enum hal_tex_filter {
+    HAL_TEX_NEAREST = 0,
+    HAL_TEX_BILINEAR = 1,
+} hal_tex_filter;
+
+/* Samples with REPEAT wrapping; nearest is exact, bilinear blends
+ * the 4 neighbors (premultiplied-safe enough for opaque use). */
+hal_color hal_texture_sample(const hal_texture *tex, hal_f32 u,
+                             hal_f32 v, hal_tex_filter filter);
+
+/* A textured screen-space triangle: TRUE perspective correction —
+ * uv/w and 1/w interpolate affinely in screen space and divide per
+ * pixel (w* are the vertices' CLIP-space w). Intensity interpolates
+ * perspective-correctly on this path. The texel MODULATES `color`
+ * together with the intensity. */
+void hal_raster_triangle_uv(hal_raster *r, hal_vec3f a, hal_f32 ia,
+                            hal_f32 wa, hal_vec2f uva, hal_vec3f b,
+                            hal_f32 ib, hal_f32 wb, hal_vec2f uvb,
+                            hal_vec3f c, hal_f32 ic, hal_f32 wc,
+                            hal_vec2f uvc, hal_color color,
+                            const hal_texture *tex,
+                            hal_tex_filter filter);
 
 /* A depth-tested line (Bresenham with interpolated z). */
 void hal_raster_line(hal_raster *r, hal_vec3f a, hal_vec3f b,
