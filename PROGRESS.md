@@ -565,6 +565,10 @@ case; noted below).
 
 ## Log
 
+- **2026-11-18 — session 3, item 7: v0.1.0.** README with
+  screenshots (the editor + a posed character render through the
+  example project), the tested feature list, known limitations;
+  v0.1.0 tagged.
 - **2026-11-18 — session 3, item 6: M11 polish.** Theme switching
   with a shipped Daylight theme; reload-verified example projects
   (tool/prop/animated character); shortcuts + user-guide docs; FBX

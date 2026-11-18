@@ -33,11 +33,60 @@ and an expert should never fight the interface.
   with tests (a headless tier that needs no display, plus a display tier
   under Xvfb).
 
-## Status
+## Screenshots
 
-Early development — see [PROGRESS.md](PROGRESS.md) for the honest
-milestone ledger and [CHANGELOG.md](CHANGELOG.md) for the history. The
-roadmap (M0…M11) lives at the top of PROGRESS.md.
+| The editor (modeling, sidebar, timeline) | A rigged, animated character (examples/) |
+| --- | --- |
+| ![The Halcyon editor](docs/screenshots/editor.png) | ![A posed character render](docs/screenshots/character-wave.png) |
+
+## Status: v0.1.0
+
+The first usable release. What works, tested (2186 headless checks +
+a display tier):
+
+- **Modeling** — mesh edit mode with vertex/edge/face selection,
+  extrude, inset, bevel, loop cut, subdivide, merge, delete, mirror,
+  normal tools; a move gizmo and modal rotate/scale; six primitives
+  and ready-made presets; everything undoable.
+- **Materials & UVs** — PBR-style materials with textures (viewport
+  sampling is perspective-correct, nearest/bilinear), per-loop UVs,
+  planar/box/smart-lite unwraps, a UV editor.
+- **Rigging & skinning** — armatures with posing, automatic weights,
+  weight painting, 2-bone IK.
+- **Animation** — clips, channels, per-key easing, slerp, a timeline
+  with scrubbing and playback, curve graphs.
+- **Interchange** — glTF 2.0 (.glb) export AND import (meshes,
+  normals, materials, textures, skins, animations — round-trip
+  tested, including rigged characters), OBJ and binary STL export,
+  OBJ import; Z-up/centimeter export options; batch export and box
+  colliders.
+- **Rendering** — a from-scratch CPU rasterizer (back-face culling,
+  near clipping, depth buffer, textured and smooth-shaded paths);
+  preview PNGs, turntables, thumbnails. ~73 fps at 100k triangles
+  at 1280x720 on slow hardware (docs/performance.md).
+- **The app** — its own widget toolkit and theming (.haltheme
+  files), autosave, a strict text project format, example projects.
+
+See [PROGRESS.md](PROGRESS.md) for the honest ledger (including
+everything that does NOT work yet), [CHANGELOG.md](CHANGELOG.md) for
+the history, and [docs/user-guide.md](docs/user-guide.md) for a
+start-to-export walkthrough. Keyboard map: docs/shortcuts.md.
+
+## Known limitations (v0.1)
+
+- No FBX (assessed and declined for now — docs/decisions.md D-015);
+  glTF/OBJ/STL are the interchange paths.
+- Convex-hull colliders are not implemented (box colliders are).
+- Extrude/inset work per face (region extrusion leaves seams);
+  bevel handles single manifold edges; smart unwrap is
+  projection-based, not angle-based flattening.
+- The curve editor visualizes curves; keys are inserted/sampled via
+  the timeline, easing is per-key data.
+- glTF skin import ignores foreign joints' rest rotations (Halcyon's
+  own exports round trip exactly); glTF import flattens node
+  hierarchies into world transforms.
+- Single-threaded rasterizer; no GPU path yet (requested from FDK in
+  docs/FDK-REQUESTS.md).
 
 ## Building
 
@@ -71,6 +120,7 @@ src/core/      math, scene graph, undo/redo, project files, mesh data
 src/render/    the 3D rasterizer and camera
 src/ui/        Halcyon's own widget toolkit and theming
 src/io/        importers and exporters (glTF, OBJ, STL, ...)
-tests/         headless test tier + the display tier
+tests/         headless test tier + the display tier + the benchmark
+examples/      example projects (.halcyon) and the Daylight theme
 docs/          architecture, decisions, formats, FDK requests
 ```

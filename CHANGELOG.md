@@ -4,6 +4,15 @@ The format follows keep-a-changelog (Added / Changed / Fixed /
 Removed); dates are ISO. Everything listed here is built and tested —
 PROGRESS.md carries the honest ledger of what is NOT done yet.
 
+## [v0.1.0] — 2026-11-18
+
+The first usable release: modeling, materials/UVs with textures,
+rigging/skinning, animation, glTF (with skins) + OBJ + STL
+interchange with Z-up/unit options, batch export, box colliders,
+LODs, presets, preview renders, theming, example projects, and the
+docs set (user guide, shortcuts, performance). See README.md for the
+feature list and known limitations.
+
 ## [Unreleased]
 
 ### Added — M11 polish (2026-11-18, session 3)
