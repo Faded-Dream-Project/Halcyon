@@ -597,6 +597,42 @@ case; noted below).
   sets NULL, and the world-space export round trip (the imported
   collider still contains the source verts).
 
+### Implemented and tested — modeling quality (session 4)
+
+- Region-aware extrude (hal_mesh_extrude_region): connected selected
+  faces extrude as ONE region — verts duplicated once (offset along
+  the averaged face normal), walls only on boundary edges (interior
+  shared edges stay seamless). E now uses it (identical to the
+  per-face op for single faces; the old op stays for compat).
+- Angle-based unwrap (hal_mesh_unwrap_angle): edges whose faces'
+  dihedral exceeds the threshold become seams; charts grow across
+  non-seam shared EDGES (true adjacency, unlike smart-lite's vert
+  adjacency); per-chart dominant-plane projection; charts scale to a
+  ceil(sqrt(n)) grid and shelf-pack INSIDE the UV square (the first
+  packer overflowed [0,1] with six charts — the in-range test caught
+  it).
+- Knife (hal_mesh_cut_segment + the K interaction): the drag's
+  screen endpoints unproject at the edit object's depth into a
+  world-space cut segment; every face whose EDGES the segment
+  crosses twice splits into two rings (crossings interpolated in 3D,
+  coplanarity-checked Cramer solve — the u sign was flipped at
+  first, and the ring construction put all corners in one ring;
+  both caught by tests). A knife is a SURFACE stroke: lines through
+  a solid's interior cross no face edges (documented in the test).
+  One undo per stroke; a preview line draws during the drag.
+- Vertex grab + proportional editing: G drags selected verts on the
+  camera plane (screen delta -> world via the view basis); with O
+  on, unselected verts within the radius move with a smoothstep
+  falloff from the nearest selected vert. One undo per grab.
+- Snapping: View menu cycles Off/Grid(0.25)/Increment(0.1)/Vertex;
+  Ctrl-hold applies during gizmo drags (grid/increment quantize the
+  moved component; vertex snaps the origin to the nearest other
+  object's vert within 15px). Frame Selected (F) targets the camera.
+- EDGE SLIDE deferred (honest): the trickiest of the six for the
+  least modeling value right now; recorded here.
+- Tests: test_modeling (17 checks) — region face/vert counts, seam
+  chart counts + UV ranges, knife splits/misses/on-surface semantics.
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -650,6 +686,10 @@ case; noted below).
 
 ## Log
 
+- **2026-11-18 — session 4, item 4: modeling quality.** Region
+  extrude, angle-based unwrap, the knife, proportional grab, and
+  snapping (edge slide deferred). Two knife bugs and one packer
+  overflow caught by the new tests. 2375 headless checks total.
 - **2026-11-18 — session 4, item 3: convex-hull colliders; v0.2.0.**
   A from-scratch quickhull with horizon-walk wrapping (orientation
   bug caught by the containment property test), exported as

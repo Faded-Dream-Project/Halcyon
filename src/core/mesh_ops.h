@@ -45,6 +45,11 @@ hal_mesh *hal_mesh_clone(const hal_mesh *src);
  * duplicating the face's verts, connecting side quads, selecting the
  * new verts and the new face. */
 bool hal_mesh_extrude_faces(hal_mesh *m, hal_f32 offset);
+/* REGION-AWARE extrude: connected selected faces move as ONE region
+ * (verts duplicated once, walls only on boundary edges — shared
+ * interior edges stay seamless). Identical to the per-face extrude
+ * for a single face. */
+bool hal_mesh_extrude_region(hal_mesh *m, hal_f32 offset);
 
 /* Insets every selected face: new corner verts lerped toward the
  * face centroid by t in (0,1), an inner face, and a ring of quads.
@@ -108,6 +113,14 @@ void hal_mesh_recalc_normals(hal_mesh *m);
  * Every input vertex lies on or inside the result (property-tested
  * in the suite). */
 hal_mesh *hal_mesh_convex_hull(const hal_mesh *m);
+
+/* ---- Knife ----
+ * Cuts every face the WORLD-SPACE segment (a,b) crosses: crossings
+ * with face edges become new verts (interpolated on the edge), and
+ * each face with exactly two crossings splits into two. Returns the
+ * number of cuts. */
+size_t hal_mesh_cut_segment(hal_mesh *m, hal_mat4f world,
+                            hal_vec3f a, hal_vec3f b);
 
 /* ---- Weight painting ----
  * Adjusts `bone`'s weight on every vert within `radius` (world

@@ -1615,3 +1615,306 @@ hal_mesh *hal_mesh_convex_hull(const hal_mesh *m) {
     hal_mesh_rebuild_edges(out);
     return out;
 }
+
+bool hal_mesh_extrude_region(hal_mesh *m, hal_f32 offset) {
+    if (!m || m->face_count == 0)
+        return false;
+
+    const hal_vec3f *fn = hal_mesh_face_normals(m);
+    if (!fn)
+        return false;
+
+    hal_u8 *sel = malloc(m->face_count);
+    if (!sel)
+        return false;
+    for (size_t f = 0; f < m->face_count; f++)
+        sel[f] = m->face_sel ? m->face_sel[f] : 0;
+
+    /* Edge usage across SELECTED faces: (min,max) pairs counted via
+     * a simple parallel array (regions are small). */
+    typedef struct {
+        hal_u32 a, b; /* as wound in the USING face */
+        size_t count;
+        bool boundary;
+    } redge;
+    redge *edges = NULL;
+    size_t edge_count = 0, edge_cap = 0;
+
+    /* Old -> duplicated vert map (lazy) and accumulated normals. */
+    int *dup = malloc(m->vert_count * sizeof(int));
+    hal_vec3f *nsum = calloc(m->vert_count, sizeof(hal_vec3f));
+    if (!dup || !nsum)
+        goto fail;
+    for (size_t v = 0; v < m->vert_count; v++)
+        dup[v] = -1;
+
+    for (size_t f = 0; f < m->face_count; f++) {
+        if (!sel[f])
+            continue;
+        size_t n = face_len(m, f);
+        for (size_t i = 0; i < n; i++) {
+            hal_u32 a = face_vert(m, f, i);
+            hal_u32 b = face_vert(m, f, (i + 1) % n);
+            nsum[a] = hal_vec3f_add(nsum[a], fn[f]);
+            bool found = false;
+            for (size_t e = 0; e < edge_count; e++)
+                if ((edges[e].a == a && edges[e].b == b) ||
+                    (edges[e].a == b && edges[e].b == a)) {
+                    edges[e].count++;
+                    found = true;
+                    break;
+                }
+            if (!found) {
+                if (edge_count == edge_cap) {
+                    edge_cap = edge_cap ? edge_cap * 2 : 32;
+                    redge *grown =
+                        realloc(edges, edge_cap * sizeof(*grown));
+                    if (!grown)
+                        goto fail;
+                    edges = grown;
+                }
+                edges[edge_count].a = a;
+                edges[edge_count].b = b;
+                edges[edge_count].count = 1;
+                edge_count++;
+            }
+        }
+    }
+    if (edge_count == 0)
+        goto fail;
+    for (size_t e = 0; e < edge_count; e++)
+        edges[e].boundary = edges[e].count == 1;
+
+    /* Duplicate every vert the region uses (once), offset along its
+     * faces' averaged normal. */
+    size_t verts_before = m->vert_count;
+    for (size_t f = 0; f < m->face_count; f++) {
+        if (!sel[f])
+            continue;
+        for (size_t i = 0; i < face_len(m, f); i++) {
+            hal_u32 v = face_vert(m, f, i);
+            if (dup[v] >= 0)
+                continue;
+            hal_vec3f dir = nsum[v];
+            hal_f32 len = hal_vec3f_length(dir);
+            if (len > 1e-6f)
+                dir = hal_vec3f_mul(dir, 1.0f / len);
+            else
+                dir = fn[f];
+            int nv = hal_mesh_vert_add(
+                m, hal_vec3f_add(m->verts[v],
+                                 hal_vec3f_mul(dir, offset)));
+            if (nv < 0)
+                goto fail;
+            dup[v] = nv;
+        }
+    }
+
+    /* Rewrite the selected faces onto the duplicates. */
+    for (size_t f = 0; f < m->face_count; f++) {
+        if (!sel[f])
+            continue;
+        for (size_t i = 0; i < face_len(m, f); i++) {
+            hal_u32 v = face_vert(m, f, i);
+            m->loops[m->face_off[f] + i] = (hal_u32)dup[v];
+        }
+    }
+
+    /* Walls on boundary edges only (the winding comes from the
+     * single selected face that used the edge). */
+    for (size_t e = 0; e < edge_count; e++) {
+        if (!edges[e].boundary)
+            continue;
+        hal_u32 a = edges[e].a, b = edges[e].b;
+        hal_u32 quad[4] = { a, b, (hal_u32)dup[b],
+                            (hal_u32)dup[a] };
+        hal_mesh_face_add(m, quad, 4);
+    }
+
+    free(sel);
+    free(dup);
+    free(nsum);
+    free(edges);
+    hal_mesh_invalidate_derived(m);
+    hal_mesh_select_all(m, false);
+    for (size_t v = verts_before; v < m->vert_count; v++)
+        if (m->vert_sel)
+            m->vert_sel[v] = 1;
+    hal_mesh_rebuild_edges(m);
+    return true;
+
+fail:
+    free(sel);
+    free(dup);
+    free(nsum);
+    free(edges);
+    return false;
+}
+
+size_t hal_mesh_cut_segment(hal_mesh *m, hal_mat4f world,
+                            hal_vec3f a, hal_vec3f b) {
+    if (!m)
+        return 0;
+    hal_mat4f inv = hal_mat4f_invert(world);
+    hal_vec3f la = hal_mat4f_transform_point(inv, a);
+    hal_vec3f lb = hal_mat4f_transform_point(inv, b);
+    hal_vec3f dir = hal_vec3f_sub(lb, la);
+    if (hal_vec3f_length(dir) < 1e-9f)
+        return 0;
+
+    typedef struct {
+        hal_u32 *ring;
+        size_t len;
+    } kring;
+    kring *rings = NULL;
+    size_t ring_count = 0;
+    bool *keep = malloc(m->face_count ? m->face_count : 1);
+    if (!keep)
+        return 0;
+    for (size_t f = 0; f < m->face_count; f++)
+        keep[f] = true;
+
+    size_t cuts = 0;
+    size_t original_faces = m->face_count;
+    for (size_t f = original_faces; f-- > 0;) {
+        size_t n = face_len(m, f);
+        if (n < 3 || n > 64)
+            continue;
+        /* Edge crossings with the cut segment (coplanar). */
+        hal_u32 cross_edge[64];
+        hal_f32 cross_t[64];
+        size_t crossings = 0;
+        for (size_t i = 0; i < n && crossings < 2; i++) {
+            hal_vec3f p = m->verts[face_vert(m, f, i)];
+            hal_vec3f q =
+                m->verts[face_vert(m, f, (i + 1) % n)];
+            hal_vec3f eq = hal_vec3f_sub(q, p);
+            hal_vec3f rhs = hal_vec3f_sub(p, la);
+            /* Solve la + s*dir == p + u*eq on two of the three
+             * axes (pick a non-degenerate pair). */
+            hal_f32 s = -1.0f, u = -1.0f;
+            hal_f32 den = dir.x * eq.y - dir.y * eq.x;
+            if (fabsf(den) > 1e-9f) {
+                s = (rhs.x * eq.y - rhs.y * eq.x) / den;
+                u = (rhs.x * dir.y - rhs.y * dir.x) / den;
+            } else if (fabsf(dir.y * eq.z - dir.z * eq.y) > 1e-9f) {
+                den = dir.y * eq.z - dir.z * eq.y;
+                s = (rhs.y * eq.z - rhs.z * eq.y) / den;
+                u = (rhs.y * dir.z - rhs.z * dir.y) / den;
+            } else if (fabsf(dir.x * eq.z - dir.z * eq.x) > 1e-9f) {
+                den = dir.x * eq.z - dir.z * eq.x;
+                s = (rhs.x * eq.z - rhs.z * eq.x) / den;
+                u = (rhs.x * dir.z - rhs.z * dir.x) / den;
+            } else {
+                continue; /* parallel to this edge */
+            }
+            if (s < 0.0f || s > 1.0f || u < 0.0f || u > 1.0f)
+                continue;
+            /* Coplanarity check: the crossing points from both
+             * parametrizations must coincide. */
+            hal_vec3f pt_dir = hal_vec3f_add(
+                la, hal_vec3f_mul(dir, s));
+            hal_vec3f pt_edge = hal_vec3f_add(
+                p, hal_vec3f_mul(eq, u));
+            if (hal_vec3f_distance(pt_dir, pt_edge) >
+                1e-4f * (hal_vec3f_length(dir) + 1.0f))
+                continue; /* skew lines, not a crossing */
+            bool dup = false;
+            for (size_t k = 0; k < crossings; k++)
+                if (cross_edge[k] == i)
+                    dup = true;
+            if (dup)
+                continue;
+            cross_edge[crossings] = (hal_u32)i;
+            cross_t[crossings] = u;
+            crossings++;
+        }
+        if (crossings != 2)
+            continue;
+
+        /* New verts on the crossed edges. */
+        hal_u32 base0 = face_vert(m, f, cross_edge[0]);
+        hal_u32 base1 =
+            face_vert(m, f, (cross_edge[0] + 1) % n);
+        hal_u32 base2 = face_vert(m, f, cross_edge[1]);
+        hal_u32 base3 =
+            face_vert(m, f, (cross_edge[1] + 1) % n);
+        int nv0 = hal_mesh_vert_add(
+            m, hal_vec3f_add(
+                   m->verts[base0],
+                   hal_vec3f_mul(
+                       hal_vec3f_sub(m->verts[base1],
+                                     m->verts[base0]),
+                       cross_t[0])));
+        int nv1 = hal_mesh_vert_add(
+            m, hal_vec3f_add(
+                   m->verts[base2],
+                   hal_vec3f_mul(
+                       hal_vec3f_sub(m->verts[base3],
+                                     m->verts[base2]),
+                       cross_t[1])));
+        if (nv0 < 0 || nv1 < 0)
+            continue;
+
+        /* Two rings: A keeps corners 0..e1 + both new verts, B the
+         * remaining corners. Run lengths change, so the face dies
+         * and both rings are re-added (compacted once below). */
+        size_t e0 = cross_edge[0], e1 = cross_edge[1];
+        hal_u32 *ring_a = malloc((n + 2) * sizeof(hal_u32));
+        hal_u32 *ring_b = malloc((n + 2) * sizeof(hal_u32));
+        if (!ring_a || !ring_b) {
+            free(ring_a);
+            free(ring_b);
+            continue;
+        }
+        /* Ring A: nv0, corners e0+1..e1, nv1 (the forward side).
+         * Ring B: nv1, corners e1+1..n-1 wrapping to 0..e0, nv0. */
+        size_t ra = 0, rb = 0;
+        ring_a[ra++] = (hal_u32)nv0;
+        for (size_t i = e0 + 1; i <= e1; i++)
+            ring_a[ra++] = face_vert(m, f, i);
+        ring_a[ra++] = (hal_u32)nv1;
+        ring_b[rb++] = (hal_u32)nv1;
+        for (size_t i = e1 + 1; i < n; i++)
+            ring_b[rb++] = face_vert(m, f, i);
+        for (size_t i = 0; i <= e0; i++)
+            ring_b[rb++] = face_vert(m, f, i);
+        ring_b[rb++] = (hal_u32)nv0;
+
+        if (ra >= 3 && rb >= 3) {
+            kring *grown =
+                realloc(rings, (ring_count + 2) * sizeof(*rings));
+            if (grown) {
+                rings = grown;
+                rings[ring_count].ring = ring_a;
+                rings[ring_count].len = ra;
+                rings[ring_count + 1].ring = ring_b;
+                rings[ring_count + 1].len = rb;
+                ring_count += 2;
+                keep[f] = false;
+                cuts++;
+            } else {
+                free(ring_a);
+                free(ring_b);
+            }
+        } else {
+            free(ring_a);
+            free(ring_b);
+        }
+    }
+
+    if (cuts > 0) {
+        compact_faces(m, keep);
+        for (size_t r = 0; r < ring_count; r++) {
+            hal_mesh_face_add(m, rings[r].ring,
+                              (hal_u32)rings[r].len);
+            free(rings[r].ring);
+        }
+        hal_mesh_invalidate_derived(m);
+        hal_mesh_rebuild_edges(m);
+    }
+    free(rings);
+    free(keep);
+    return cuts;
+
+}

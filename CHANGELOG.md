@@ -4,6 +4,20 @@ The format follows keep-a-changelog (Added / Changed / Fixed /
 Removed); dates are ISO. Everything listed here is built and tested —
 PROGRESS.md carries the honest ledger of what is NOT done yet.
 
+## [Unreleased]
+
+### Added — modeling quality (2026-11-18, session 4)
+
+- Region-aware extrude (E): connected faces move as one seamless
+  region; walls only on boundary edges.
+- Angle-based unwrap: dihedral seams, edge-adjacency charts,
+  grid-fitted packing inside the UV square.
+- Knife (K): drag across a mesh to split faces along the stroke;
+  undoable, with a preview line.
+- Vertex grab (G) with proportional editing (O, smoothstep falloff).
+- Snapping on gizmo drags (Ctrl-hold): grid 0.25, increment 0.1,
+  vertex; View menu + Frame Selected (F). Edge slide deferred.
+
 ## [v0.2.0] — 2026-11-18
 
 Robust glTF import (foreign rigs exact, materials, textures in all

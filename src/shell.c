@@ -100,6 +100,22 @@ struct hal_app {
     bool export_z_up;
     bool export_cm;
 
+    /* Edit-mode vertex grab (with proportional falloff). */
+    bool grabbing;
+    hal_object_id grab_obj;
+    hal_mesh *grab_snapshot;
+    hal_vec3f *grab_orig; /* pre-grab positions (owned) */
+    bool prop_edit;       /* O: proportional falloff toggle  */
+    hal_f32 prop_radius;  /* world units                    */
+
+    /* Snapping for object gizmo drags (Ctrl-hold applies).
+     * 0 = off, 1 = grid (0.25), 2 = increment (0.1), 3 = vertex. */
+    int snap_mode;
+
+    /* Knife: edit-mode cut drag (K starts it, release cuts). */
+    bool knifing;
+    hal_pointf knife_start;
+
     /* Weight paint mode: drag over a bound mesh to adjust the
      * active bone's weights (Shift subtracts). */
     bool paint_mode;
@@ -525,7 +541,9 @@ static void apply_mesh_op(hal_app *app, const char *label,
 /* Thin adapters so every operator fits apply_mesh_op's signature. */
 static bool op_extrude(hal_mesh *m, void *user) {
     (void)user;
-    return hal_mesh_extrude_faces(m, 0.5f);
+    /* Region-aware: single faces behave exactly like the per-face
+     * extrude; multi-face selections move as one seamless region. */
+    return hal_mesh_extrude_region(m, 0.5f);
 }
 static bool op_inset(hal_mesh *m, void *user) {
     (void)user;
@@ -1064,6 +1082,19 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, edit, NULL, NULL, NULL, NULL);
     hal_menu_item_add(bar, edit, "Generate LOD", NULL, menu_action,
                       app);
+
+    int view_menu = hal_menu_add(bar, "View");
+    hal_menu_item_add(bar, view_menu, "Snap: Off", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, view_menu, "Snap: Grid (0.25)", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, view_menu, "Snap: Increment (0.1)", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, view_menu, "Snap: Vertex", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, view_menu, NULL, NULL, NULL, NULL);
+    hal_menu_item_add(bar, view_menu, "Frame Selected (F)", NULL,
+                      menu_action, app);
 
     int render_menu = hal_menu_add(bar, "Render");
     hal_menu_item_add(bar, render_menu, "Preview PNG...", NULL,
@@ -1814,7 +1845,28 @@ static void menu_action(hal_widget *menubar, int menu, int item,
         default:
             break;
         }
-    } else if (menu == 2) { /* Render */
+    } else if (menu == 2) { /* View */
+        if (item <= 3) {
+            app->snap_mode = item;
+            set_status(app, "Snap: %s",
+                       item == 0   ? "off"
+                       : item == 1 ? "grid 0.25 (hold Ctrl)"
+                       : item == 2 ? "increment 0.1 (hold Ctrl)"
+                                   : "vertex (hold Ctrl)");
+        } else if (item == 5) {
+            /* Frame selected: point the camera at it. */
+            hal_object *obj = hal_scene_object(
+                app->scene, hal_scene_selected(app->scene));
+            if (obj) {
+                hal_mat4f world =
+                    hal_object_world_matrix(app->scene, obj);
+                app->camera.target = hal_mat4f_transform_point(
+                    world, hal_vec3f_zero());
+                set_status(app, "Framed %s", obj->name);
+                app->dirty = true;
+            }
+        }
+    } else if (menu == 3) { /* Render */
         switch (item) {
         case 0: /* Preview PNG */
         case 1: /* Turntable */
@@ -1833,7 +1885,7 @@ static void menu_action(hal_widget *menubar, int menu, int item,
         default:
             break;
         }
-    } else if (menu == 3) { /* Animation */
+    } else if (menu == 4) { /* Animation */
         switch (item) {
         case 0: {
             char name[64];
@@ -1900,7 +1952,7 @@ static void menu_action(hal_widget *menubar, int menu, int item,
         default:
             break;
         }
-    } else if (menu == 4) { /* Add */
+    } else if (menu == 5) { /* Add */
         if (item <= 5) {
             add_object(app, ADD_NAMES[item],
                        HAL_OBJECT_MESH, hal_vec3f_zero());
@@ -2225,6 +2277,133 @@ static void paint_end(hal_app *app) {
     }
 }
 
+/* ---- Edit-mode vertex grab + proportional editing ---- */
+
+static void grab_begin(hal_app *app, hal_mat4f vpm, hal_rectf vp,
+                       hal_f32 px, hal_f32 py) {
+    hal_object *obj = hal_scene_object(app->scene, app->edit_obj);
+    if (!obj || !obj->mesh || app->sel_mode != 0) {
+        set_status(app, "Grab: vertex mode with selected verts");
+        return;
+    }
+    bool any = false;
+    for (size_t v = 0; v < obj->mesh->vert_count; v++)
+        if (obj->mesh->vert_sel && obj->mesh->vert_sel[v])
+            any = true;
+    if (!any) {
+        set_status(app, "Grab: select verts first");
+        return;
+    }
+    (void)vpm;
+    (void)vp;
+    (void)px;
+    (void)py;
+    app->grab_obj = app->edit_obj;
+    app->grab_snapshot = hal_mesh_clone(obj->mesh);
+    app->grab_orig = malloc(obj->mesh->vert_count *
+                            sizeof(hal_vec3f));
+    if (app->grab_snapshot && app->grab_orig) {
+        for (size_t v = 0; v < obj->mesh->vert_count; v++)
+            app->grab_orig[v] = obj->mesh->verts[v];
+        app->grabbing = true;
+        /* The proportional radius defaults from the mesh's size. */
+        hal_vec3f bmin, bmax;
+        hal_mesh_bounds(obj->mesh, &bmin, &bmax);
+        app->prop_radius = hal_vec3f_distance(bmin, bmax) / 4.0f;
+    } else {
+        hal_mesh_destroy(app->grab_snapshot);
+        free(app->grab_orig);
+        app->grab_snapshot = NULL;
+        app->grab_orig = NULL;
+    }
+}
+
+static void grab_motion(hal_app *app, hal_mat4f vpm, hal_rectf vp,
+                        hal_f32 dx, hal_f32 dy) {
+    hal_object *obj = hal_scene_object(app->scene, app->grab_obj);
+    if (!obj || !obj->mesh || !app->grab_orig)
+        return;
+    /* Screen delta -> world delta at the object's depth (camera
+     * plane). */
+    hal_mat4f world = hal_object_world_matrix(app->scene, obj);
+    hal_vec3f origin =
+        hal_mat4f_transform_point(world, hal_vec3f_zero());
+    hal_f32 dist =
+        hal_vec3f_distance(hal_camera_eye(&app->camera), origin);
+    hal_f32 world_per_px =
+        (2.0f * dist * (hal_f32)tan((double)app->camera.fov_y * 0.5)) /
+        vp.height;
+    /* Camera right/up (the view matrix's rows are the camera
+     * basis), mapped into the object's LOCAL space. */
+    hal_mat4f view_m = hal_camera_view(&app->camera);
+    hal_vec3f world_right = hal_vec3f_make(
+        view_m.m[0], view_m.m[4], view_m.m[8]);
+    hal_vec3f world_up = hal_vec3f_make(
+        view_m.m[1], view_m.m[5], view_m.m[9]);
+    hal_mat4f inv = hal_mat4f_invert(world);
+    hal_vec3f cam_right =
+        hal_mat4f_transform_dir(inv, world_right);
+    hal_vec3f cam_up =
+        hal_mat4f_transform_dir(inv, world_up);
+    hal_vec3f delta = hal_vec3f_add(
+        hal_vec3f_mul(cam_right, dx * world_per_px),
+        hal_vec3f_mul(cam_up, -dy * world_per_px));
+    (void)vpm;
+
+    hal_mesh *mm = obj->mesh;
+    for (size_t v = 0; v < mm->vert_count; v++) {
+        if (mm->vert_sel && mm->vert_sel[v]) {
+            mm->verts[v] =
+                hal_vec3f_add(app->grab_orig[v], delta);
+        } else if (app->prop_edit) {
+            /* Falloff from the nearest SELECTED vert's rest
+             * position. */
+            hal_f32 best = 1e30f;
+            for (size_t s2 = 0; s2 < mm->vert_count; s2++)
+                if (mm->vert_sel && mm->vert_sel[s2])
+                    best = fminf(
+                        best,
+                        hal_vec3f_distance(app->grab_orig[v],
+                                           app->grab_orig[s2]));
+            if (best < app->prop_radius) {
+                hal_f32 t = 1.0f - best / app->prop_radius;
+                t = t * t * (3.0f - 2.0f * t);
+                mm->verts[v] = hal_vec3f_add(
+                    app->grab_orig[v], hal_vec3f_mul(delta, t));
+            }
+        }
+    }
+    hal_mesh_invalidate_derived(mm);
+    app->dirty = true;
+}
+
+static void grab_end(hal_app *app) {
+    app->grabbing = false;
+    hal_object *obj = hal_scene_object(app->scene, app->grab_obj);
+    if (!obj || !app->grab_snapshot) {
+        hal_mesh_destroy(app->grab_snapshot);
+        free(app->grab_orig);
+        app->grab_snapshot = NULL;
+        app->grab_orig = NULL;
+        return;
+    }
+    mesh_cmd *cmd = malloc(sizeof(*cmd));
+    if (cmd) {
+        cmd->id = app->grab_obj;
+        cmd->snapshot = app->grab_snapshot;
+        app->grab_snapshot = NULL;
+        hal_undo_stack_push(app->undo, "Grab", mesh_cmd_apply,
+                            mesh_cmd_revert, mesh_cmd_free, cmd);
+    } else {
+        hal_mesh_destroy(app->grab_snapshot);
+        app->grab_snapshot = NULL;
+    }
+    free(app->grab_orig);
+    app->grab_orig = NULL;
+    set_status(app, "Grab: done%s",
+               app->prop_edit ? " (proportional)" : "");
+}
+
 /* Picks a bone of the posed armature by screen-space distance to the
  * projected head-tail segment. Returns the bone index or -1. */
 static int pick_bone(hal_app *app, hal_object *arm_obj, hal_mat4f vpm,
@@ -2431,10 +2610,69 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
                         vp.height;
                     hal_f32 delta =
                         (dx * dir.x + dy * dir.y) / len * world_per_px;
-                    hal_object_set_location(
-                        app->scene, obj->id,
-                        hal_vec3f_add(obj->location,
-                                      hal_vec3f_mul(axis, delta)));
+                    hal_vec3f new_loc = hal_vec3f_add(
+                        obj->location, hal_vec3f_mul(axis, delta));
+                    /* Ctrl-hold applies the snap mode to the moved
+                     * component (grid/increment); vertex snaps the
+                     * origin to the nearest OTHER object's vert. */
+                    bool ctrl = (event->key.modifiers &
+                                 HAL_MOD_CTRL) != 0;
+                    if (ctrl && app->snap_mode == 1) {
+                        hal_f32 *comp = axis.x != 0.0f
+                                            ? &new_loc.x
+                                        : axis.y != 0.0f
+                                            ? &new_loc.y
+                                            : &new_loc.z;
+                        *comp = roundf(*comp / 0.25f) * 0.25f;
+                    } else if (ctrl && app->snap_mode == 2) {
+                        hal_f32 *comp = axis.x != 0.0f
+                                            ? &new_loc.x
+                                        : axis.y != 0.0f
+                                            ? &new_loc.y
+                                            : &new_loc.z;
+                        *comp = roundf(*comp / 0.1f) * 0.1f;
+                    } else if (ctrl && app->snap_mode == 3) {
+                        hal_f32 best_d = 15.0f; /* px */
+                        hal_vec3f best_p = new_loc;
+                        for (size_t oi = 0;
+                             oi < hal_scene_object_count(
+                                      app->scene);
+                             oi++) {
+                            hal_object *other =
+                                hal_scene_object_at(app->scene, oi);
+                            if (!other->mesh ||
+                                other->id == obj->id)
+                                continue;
+                            hal_mat4f ow =
+                                hal_object_world_matrix(
+                                    app->scene, other);
+                            for (size_t v = 0;
+                                 v < other->mesh->vert_count;
+                                 v++) {
+                                hal_f32 w2;
+                                hal_vec3f sp =
+                                    hal_camera_project(
+                                        &app->camera, vpm,
+                                        hal_mat4f_transform_point(
+                                            ow, other->mesh
+                                                     ->verts[v]),
+                                        vp, &w2);
+                                if (w2 <= 0.0f)
+                                    continue;
+                                hal_f32 d2 =
+                                    (sp.x - px) * (sp.x - px) +
+                                    (sp.y - py) * (sp.y - py);
+                                if (d2 < best_d * best_d) {
+                                    best_d = sqrtf(d2);
+                                    best_p = hal_mat4f_transform_point(
+                                        ow, other->mesh->verts[v]);
+                                }
+                            }
+                        }
+                        new_loc = best_p;
+                    }
+                    hal_object_set_location(app->scene, obj->id,
+                                            new_loc);
                 }
             }
             return true;
@@ -2468,6 +2706,71 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
     if (app->painting &&
         event->type == HAL_EVENT_POINTER_BUTTON_UP) {
         paint_end(app);
+        return true;
+    }
+
+    /* --- Vertex grab drag (edit mode) --- */
+    if (app->grabbing && event->type == HAL_EVENT_POINTER_MOTION) {
+        hal_f32 dx = px - app->drag_last.x;
+        hal_f32 dy = py - app->drag_last.y;
+        app->drag_last = (hal_pointf){ px, py };
+        grab_motion(app, vpm, vp, dx, dy);
+        return true;
+    }
+    if (app->grabbing &&
+        event->type == HAL_EVENT_POINTER_BUTTON_UP) {
+        grab_end(app);
+        return true;
+    }
+
+    /* --- Knife: the release performs the cut --- */
+    if (app->knifing &&
+        event->type == HAL_EVENT_POINTER_BUTTON_UP) {
+        app->knifing = false;
+        hal_object *obj =
+            hal_scene_object(app->scene, app->edit_obj);
+        if (!obj || !obj->mesh) {
+            set_status(app, "Knife: no edit mesh");
+            return true;
+        }
+        /* Unproject the drag ends at the object center's depth. */
+        hal_mat4f world =
+            hal_object_world_matrix(app->scene, obj);
+        hal_vec3f center_w = hal_mat4f_transform_point(
+            world, hal_vec3f_zero());
+        hal_f32 dist = hal_vec3f_distance(
+            hal_camera_eye(&app->camera), center_w);
+        hal_vec3f dir_a = hal_camera_ray(
+            &app->camera, vpm, vp, app->knife_start.x,
+            app->knife_start.y)
+            .dir;
+        hal_vec3f dir_b =
+            hal_camera_ray(&app->camera, vpm, vp, px, py)
+            .dir;
+        hal_vec3f eye = hal_camera_eye(&app->camera);
+        hal_vec3f a = hal_vec3f_add(eye,
+            hal_vec3f_mul(dir_a, dist));
+        hal_vec3f b = hal_vec3f_add(eye,
+            hal_vec3f_mul(dir_b, dist));
+
+        hal_mesh *snap = hal_mesh_clone(obj->mesh);
+        size_t cuts = hal_mesh_cut_segment(obj->mesh, world, a, b);
+        if (cuts > 0 && snap) {
+            mesh_cmd *cmd = malloc(sizeof(*cmd));
+            if (cmd) {
+                cmd->id = obj->id;
+                cmd->snapshot = snap;
+                snap = NULL;
+                hal_undo_stack_push(app->undo, "Knife",
+                                    mesh_cmd_apply,
+                                    mesh_cmd_revert, mesh_cmd_free,
+                                    cmd);
+            }
+        }
+        hal_mesh_destroy(snap);
+        set_status(app, "Knife: %zu cut%s", cuts, cuts == 1 ? "" : "s");
+        app->dirty = true;
+        hal_autosave_mark_dirty(app->autosave);
         return true;
     }
 
@@ -2704,6 +3007,25 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
                 app->drag_last = app->last_pointer;
                 set_status(app, "Rotate bone: move, click to accept");
             }
+            return true;
+        }
+        if (app->edit_mode && key_plain == 10) { /* G: grab verts */
+            grab_begin(app, vpm, vp, px, py);
+            if (app->grabbing)
+                app->drag_last = (hal_pointf){ px, py };
+            return true;
+        }
+        if (key_plain == 18) { /* O: proportional editing */
+            app->prop_edit = !app->prop_edit;
+            set_status(app, "Proportional editing: %s",
+                       app->prop_edit ? "on (O)" : "off");
+            return true;
+        }
+        if (app->edit_mode && key_plain == 14) { /* K: knife */
+            app->knifing = true;
+            app->knife_start = (hal_pointf){ px, py };
+            set_status(app, "Knife: drag across the mesh, release"
+                            " to cut");
             return true;
         }
         if (!app->edit_mode && !app->pose_mode) {
@@ -3035,6 +3357,14 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
                     if (w0 > 0.0f && w1 > 0.0f)
                         hal_canvas_draw_line(&canvas, a.x, a.y, b.x, b.y,
                                              t->colors[HAL_THEME_ACCENT]);
+                }
+                /* The knife drag line. */
+                if (app->knifing) {
+                    hal_canvas_draw_line(
+                        &canvas, app->knife_start.x,
+                        app->knife_start.y, app->last_pointer.x,
+                        app->last_pointer.y,
+                        t->colors[HAL_THEME_DANGER]);
                 }
                 /* Selected faces: centroid dots. */
                 for (size_t f = 0; f < mm->face_count; f++) {

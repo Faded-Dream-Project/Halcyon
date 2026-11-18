@@ -39,6 +39,12 @@ bool hal_mesh_unwrap_box(hal_mesh *m);
 /* Smart-lite unwrap: normal-similarity islands, per-island dominant
  * axis projection, greedy row packing. */
 bool hal_mesh_unwrap_smart(hal_mesh *m);
+/* ANGLE-BASED unwrap: edges whose faces' dihedral angle exceeds
+ * `threshold_deg` become seams; charts grow across non-seam shared
+ * EDGES (true adjacency, unlike smart-lite's vert adjacency); each
+ * chart projects onto its dominant plane and the charts shelf-pack
+ * into the UV square. */
+bool hal_mesh_unwrap_angle(hal_mesh *m, hal_f32 threshold_deg);
 
 #ifdef __cplusplus
 }
