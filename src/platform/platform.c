@@ -313,6 +313,40 @@ hal_result hal_window_get_scale(const hal_window *window, hal_f32 *out_scale) {
     return HAL_OK;
 }
 
+hal_result hal_window_get_render_backend(const hal_window *window,
+                                         hal_render_backend *out) {
+    if (!window || !out)
+        return HAL_ERR_INVALID_ARGUMENT;
+    fdk_render_backend b = FDK_RENDER_BACKEND_CPU;
+    fdk_result r = fdk_window_get_render_backend(window->fdk, &b);
+    if (!fdk_ok(r)) {
+        *out = HAL_RENDER_BACKEND_UNKNOWN;
+        return hal_result_from_fdk(r);
+    }
+    switch (b) {
+    case FDK_RENDER_BACKEND_CPU:
+        *out = HAL_RENDER_BACKEND_CPU;
+        break;
+    case FDK_RENDER_BACKEND_VULKAN:
+        *out = HAL_RENDER_BACKEND_VULKAN;
+        break;
+    case FDK_RENDER_BACKEND_OPENGL:
+        *out = HAL_RENDER_BACKEND_OPENGL;
+        break;
+    default:
+        *out = HAL_RENDER_BACKEND_UNKNOWN;
+        break;
+    }
+    return HAL_OK;
+}
+
+const char *hal_window_render_device(const hal_window *window) {
+    if (!window)
+        return "<none>";
+    const char *d = fdk_window_render_device(window->fdk);
+    return d ? d : "<none>";
+}
+
 hal_result hal_window_get_surface(hal_window *window,
                                   hal_surface **out_surface) {
     if (!window || !out_surface)

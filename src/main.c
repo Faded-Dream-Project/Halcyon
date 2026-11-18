@@ -69,6 +69,7 @@ int main(int argc, char **argv) {
     bool ui_audit = false;
     bool zorder_test = false;
     bool entries_test = false;
+    bool gpu_info = false;
     int audit_w = 1920, audit_h = 1080;
     int win_w = 1280, win_h = 800; /* --size overrides any mode */
     hal_f32 audit_scale = 0.0f; /* 0 = the window's real scale */
@@ -84,7 +85,9 @@ int main(int argc, char **argv) {
             zorder_test = true;
         } else if (strcmp(argv[i], "--test-entries") == 0) {
             entries_test = true;
-        } else if (strcmp(argv[i], "--ui-audit") == 0) {
+        } else if (strcmp(argv[i], "--gpu-info") == 0)
+            gpu_info = true;
+        else if (strcmp(argv[i], "--ui-audit") == 0) {
             ui_audit = true;
             if (i + 1 < argc)
                 audit_w = atoi(argv[++i]);
@@ -159,6 +162,23 @@ int main(int argc, char **argv) {
                 frame.presented_once = true;
                 frame.need_redraw = false;
             }
+        }
+
+        if (gpu_info && frame.presented_once) {
+            hal_render_backend backend = HAL_RENDER_BACKEND_UNKNOWN;
+            hal_window_get_render_backend(frame.window, &backend);
+            const char *bname =
+                backend == HAL_RENDER_BACKEND_CPU
+                    ? "CPU"
+                    : (backend == HAL_RENDER_BACKEND_VULKAN
+                           ? "Vulkan"
+                           : (backend == HAL_RENDER_BACKEND_OPENGL
+                                  ? "OpenGL"
+                                  : "unknown"));
+            printf("gpu-info: backend=%s device=%s\n", bname,
+                   hal_window_render_device(frame.window));
+            fflush(stdout);
+            hal_app_quit(frame.app);
         }
 
         if (entries_test && frame.presented_once) {

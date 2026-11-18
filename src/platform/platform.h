@@ -100,6 +100,20 @@ hal_result hal_window_get_size(const hal_window *window, hal_size *out_size);
 /* Buffer pixels per logical unit (HiDPI). 1.0 = logical == physical. */
 hal_result hal_window_get_scale(const hal_window *window, hal_f32 *out_scale);
 
+/* Which present path/backend carries this window's frames, and the
+ * device string behind an active GPU lane ("<none>" on the CPU
+ * path). A diagnostic for --gpu-info; never an identity. */
+typedef enum hal_render_backend {
+    HAL_RENDER_BACKEND_CPU = 0,
+    HAL_RENDER_BACKEND_VULKAN = 1,
+    HAL_RENDER_BACKEND_OPENGL = 2,
+    HAL_RENDER_BACKEND_UNKNOWN = 3, /* the query failed */
+} hal_render_backend;
+
+hal_result hal_window_get_render_backend(const hal_window *window,
+                                         hal_render_backend *out);
+const char *hal_window_render_device(const hal_window *window);
+
 /* The window's drawing surface (one per window, owned by the window). */
 hal_result hal_window_get_surface(hal_window *window, hal_surface **out_surface);
 

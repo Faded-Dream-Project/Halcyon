@@ -44,6 +44,51 @@
 
 ## Current state
 
+**SESSION 6 (2026-11-18) — steps 1a/1b fixed and regression-tested;
+STEP 2 STOPPED on FDK-build evidence; --gpu-info added.** The full
+account is in the log entries below; the short form:
+
+- STEP 0: FDK 1.0.0 HAS a real GPU draw API (extension surfaces +
+  GL frame callbacks + fdk_texture), reported with paths and line
+  numbers. R-001 rewritten.
+- STEP 1a: popups/tooltips paint LAST, over the viewport (the real
+  screenshot had the File menu under it); --test-zorder proves
+  pixel ownership AND input priority (fails without the fix).
+- STEP 1b: Color entries were blank for material-less objects —
+  they now show the default material's values; --test-entries
+  asserts buffers + text ink for all 7 entries. (Name/Location
+  could not be reproduced empty here; the test will localize it if
+  they still misbehave on the reporting machine.)
+- STEP 2 STOPPED, honestly. Evidence, all reproducible:
+  1. The API is real: fdk_ext_gl_make_current /
+     fdk_ext_gl_set_frame_callback / fdk_ext_gl_swap (fdk_extend.h:
+     997-1014), gated by FDK_EXT_CAP_GL.
+  2. On THIS FDK build (fdk-install), the X11 backend answers
+     FDK_ERR_UNSUPPORTED (-6, "valid request, backend can't do it")
+     to fdk_ext_gl_make_current and set_frame_callback under every
+     condition I could create: FDK_RENDER_GPU context, the GL lane
+     loaded (FDK_EXT_CAP_GL true via FDK_GL_FORCE=1 + a GPU-mode
+     probe window), an fbconfig-matched X visual, shown surface
+     with present cycles. Disassembly of fdk_ext_gl_make_current
+     shows it tail-calls a vtable slot on the adopted window that
+     is never filled on X11.
+  3. The build has NO Wayland backend: ldd libfdk.so shows only
+     libX11; forcing FDK_PLATFORM_WAYLAND fails init with
+     FDK_ERR_NO_DISPLAY. (I installed a user-local headless weston
+     to test the Wayland path — moot, this build cannot connect.)
+  4. Sandbox honesty: only llvmpipe (software GL) here; no
+     hardware GPU — even a working path could be tested for
+     CORRECTNESS ONLY, never performance. No fps numbers will be
+     claimed from this environment.
+  Per the instruction ("Do not implement a workaround, a fallback
+  or dlopen hacks") STEP 2 is not implemented. To proceed I need
+  one of: an FDK build whose X11 backend fills the ext-window GL
+  vtable slot; an FDK build with the Wayland backend (and a
+  Wayland session on the target machine); or an explicit decision
+  to change the plan. --gpu-info now prints the honest lane state
+  on any machine (backend + device string) — run it on the
+  reporting desktop and send the output.
+
 **STEP 0 (2026-11-18, session 6) — FDK HAS a GPU API; the old
 "blocked" note was wrong.** FDK 1.0.0 exposes a real GPU draw path
 (not merely a present lane): extension surfaces get a per-frame GL

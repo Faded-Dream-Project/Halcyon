@@ -11,7 +11,25 @@ Format: `R-### status — title`.
 
 ---
 
-## R-001 ANSWERED (2026-11-18) — GPU drawing surface
+## R-001 open (revised 2026-11-18, session 6) — ext-surface GL usable on the X11 backend (or a Wayland-enabled build)
+
+The 1.0.0 extension API IS the GPU draw path (fdk_extend.h:992-1014:
+fdk_ext_gl_make_current / set_frame_callback / swap / fences, plus
+fdk_texture for CPU-pixel compositing and FDK_RENDER_GPU). The
+sub-rect API originally sketched here is not needed and is withdrawn.
+What is still needed to USE it from Halcyon:
+
+1. On X11, fdk_ext_gl_make_current and fdk_ext_gl_set_frame_callback
+   answer FDK_ERR_UNSUPPORTED even with the lane loaded
+   (FDK_EXT_CAP_GL true via FDK_GL_FORCE=1 and a GPU-mode probe
+   window). The adopted window's GL vtable slot is never filled by
+   the X11 backend. Ask: fill it (GLXWindow on the adopted xid +
+   the shared lane context), or document ext GL as Wayland-only.
+2. The installed build has no Wayland backend at all (ldd: only
+   libX11; FDK_PLATFORM_WAYLAND -> FDK_ERR_NO_DISPLAY). Ask: a
+   build with Wayland enabled, if the Wayland path is the answer.
+
+Below is the original API survey (kept for reference).
 
 **Deleted as a request.** FDK 1.0.0 already ships a real GPU draw
 path; the earlier "blocked on FDK" reading was wrong. What FDK does
