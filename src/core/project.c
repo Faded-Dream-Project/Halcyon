@@ -170,19 +170,6 @@ hal_result hal_project_save(const hal_scene *scene, const char *path,
                              (double)bone->pose.w) > 0;
             }
         }
-        if (o->mesh && o->mesh->skin_weights) {
-            ok = ok && fprintf(f, "  weights %zu\n",
-                               o->mesh->vert_count) > 0;
-            for (size_t v = 0; ok && v < o->mesh->vert_count; v++) {
-                ok = ok && fprintf(f, "  wv") > 0;
-                for (size_t wi = 0; ok && wi < 4; wi++)
-                    ok = fprintf(f, " %d %.9g",
-                                 o->mesh->skin_bones[v * 4 + wi],
-                                 (double)o->mesh->skin_weights[v * 4 + wi]) >
-                         0;
-                ok = ok && fprintf(f, "\n") > 0;
-            }
-        }
         if (o->mesh) {
             const hal_mesh *mm = o->mesh;
             ok = ok && fprintf(f, "  mesh %zu %zu %zu\n", mm->vert_count,
@@ -203,6 +190,19 @@ hal_result hal_project_save(const hal_scene *scene, const char *path,
                 for (size_t li = mm->face_off[f2];
                      ok && li < mm->face_off[f2 + 1]; li++)
                     ok = fprintf(f, " %u", (unsigned)mm->loops[li]) > 0;
+                ok = ok && fprintf(f, "\n") > 0;
+            }
+        }
+        if (o->mesh && o->mesh->skin_weights) {
+            ok = ok && fprintf(f, "  weights %zu\n",
+                               o->mesh->vert_count) > 0;
+            for (size_t v = 0; ok && v < o->mesh->vert_count; v++) {
+                ok = ok && fprintf(f, "  wv") > 0;
+                for (size_t wi = 0; ok && wi < 4; wi++)
+                    ok = fprintf(f, " %d %.9g",
+                                 o->mesh->skin_bones[v * 4 + wi],
+                                 (double)o->mesh->skin_weights[v * 4 + wi]) >
+                         0;
                 ok = ok && fprintf(f, "\n") > 0;
             }
         }
@@ -998,10 +998,19 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                     mat.emissive = hal_vec3f_make(x, y, z);
                     mat.emissive_strength = s;
                 } else if (strcmp(mkey, "texture") == 0) {
-                    hal_u32 tex = 0;
-                    if (!parse_u32(&p, &tex) || !expect_end_of_line(&p)) {
+                    /* Signed: -1 = no texture (the saver writes it). */
+                    char *tok = parse_word(&p);
+                    bool tex_ok = tok != NULL;
+                    long tex = -2;
+                    if (tex_ok) {
+                        tex = strtol(tok, NULL, 10);
+                        free(tok);
+                    }
+                    if (!tex_ok || !expect_end_of_line(&p) ||
+                        tex < -1) {
                         set_err(err, err_cap,
-                                "line %d: texture wants one index",
+                                "line %d: texture wants an index"
+                                " (-1 or more)",
                                 mline);
                         result = HAL_ERR_INVALID_ARGUMENT;
                         free(mkey);

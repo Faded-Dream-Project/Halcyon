@@ -54,3 +54,17 @@ numbered, dated, and never silently reversed.
   resolutions. A GPU renderer may come later behind the same
   `hal_renderer` interface; FDK's extension API exposes native display
   handles for that path (see docs/FDK-REQUESTS.md).
+
+## D-015: FBX export is out of scope for v0.1 (2026-11-18)
+
+The roadmap carried "FBX export if feasible". Assessment: it is not,
+for v0.1. The FBX format exists in two flavors — ASCII (which most
+importers, including current Unity/Unreal/Blender builds, accept
+only partially or not at all) and binary (a large, versioned,
+sectioned binary format with deflated blocks whose geometry,
+blend-shape and skin encodings would be a multi-week reverse-
+engineering effort to write correctly). glTF 2.0 (.glb) is the
+modern interchange every engine imports natively, and Halcyon
+already exports it with skins and animations; OBJ and binary STL
+cover the classic paths. Revisit if a concrete pipeline demands FBX;
+the honest cost is recorded here.

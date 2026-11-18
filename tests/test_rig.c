@@ -169,6 +169,11 @@ static void test_project_armature_round_trip(void) {
     hal_object_id mesh_id =
         hal_scene_object_add(s, "Limb", HAL_OBJECT_MESH);
     hal_mesh *m = hal_mesh_cube(0.5f);
+    /* REGRESSION: actually bind weights before saving — the weights
+     * block used to be written BEFORE the mesh block, so reloading
+     * failed ('weights outside a mesh object'). Caught by the
+     * character example project. */
+    hal_mesh_bind_armature(m, hal_scene_object(s, arm_id)->armature);
     hal_object_set_mesh(s, mesh_id, m);
     hal_object_set_skin(s, mesh_id, arm_id);
 
@@ -194,6 +199,14 @@ static void test_project_armature_round_trip(void) {
         }
         hal_object *lm = hal_scene_object_at(loaded, 1);
         HAL_TEST_CHECK(lm && lm->skin_armature == lo->id);
+        HAL_TEST_CHECK(lm && lm->mesh && lm->mesh->skin_weights !=
+                                        NULL);
+        if (lm && lm->mesh && lm->mesh->skin_weights) {
+            hal_f32 sum = 0.0f;
+            for (int i = 0; i < 4; i++)
+                sum += lm->mesh->skin_weights[i];
+            HAL_TEST_CHECK_EQ_F(sum, 1.0f, 1e-4);
+        }
         hal_scene_destroy(loaded);
     }
     hal_scene_destroy(s);

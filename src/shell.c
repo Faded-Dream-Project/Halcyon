@@ -15,7 +15,9 @@
 #include "render/pick.h"
 #include "render/preview.h"
 #include "render/raster.h"
+#include "ui/theme.h"
 #include "render/raster.h"
+#include "ui/theme.h"
 
 #include <math.h>
 #include <stdarg.h>
@@ -682,6 +684,32 @@ static void collider_done(char *path, void *user) {
     free(path);
 }
 
+/* Theme load: swap the UI theme and refresh the snapshot render
+ * options (they copy theme colors at startup). */
+static void theme_done(char *path, void *user) {
+    hal_app *app = user;
+    if (!path) {
+        set_status(app, "Theme load cancelled");
+        return;
+    }
+    char err[256] = { 0 };
+    hal_theme *theme = hal_theme_load(path, err, sizeof(err));
+    if (!theme) {
+        set_status(app, "Theme failed: %s", err[0] ? err : "bad file");
+        free(path);
+        return;
+    }
+    const hal_theme *old = hal_ui_theme(app->ui);
+    app->render_opts.bg = theme->colors[HAL_THEME_VIEWPORT_BG];
+    app->render_opts.grid = theme->colors[HAL_THEME_VIEWPORT_GRID];
+    app->render_opts.object = theme->colors[HAL_THEME_ACCENT];
+    hal_ui_set_theme(app->ui, theme);
+    (void)old;
+    set_status(app, "Theme: %s", theme->name ? theme->name : path);
+    app->dirty = true;
+    free(path);
+}
+
 /* ---- Preview renders ---- */
 
 static void render_done(char *path, void *user) {
@@ -846,6 +874,8 @@ static void build_menus(hal_app *app) {
                       menu_action, app);
     hal_menu_item_add(bar, file, "Export Box Collider (.glb)...",
                       NULL, menu_action, app);
+    hal_menu_item_add(bar, file, "Load Theme...", NULL, menu_action,
+                      app);
     hal_menu_item_add(bar, file, NULL, NULL, NULL, NULL);
     hal_menu_item_add(bar, file, "Quit", "Ctrl+Q", menu_action, app);
 
@@ -1261,7 +1291,13 @@ static void menu_action(hal_widget *menubar, int menu, int item,
                     app->window)))
                 set_status(app, "Choose the collider output...");
             break;
-        case 14:
+        case 13:
+            if (hal_ok(hal_dialog_open_file(
+                    app->platform, "Load theme", "*.haltheme",
+                    theme_done, app, app->window)))
+                set_status(app, "Choose a theme file...");
+            break;
+        case 15:
             hal_app_quit(app);
             break;
         default:

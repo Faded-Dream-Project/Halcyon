@@ -490,6 +490,28 @@ case; noted below).
   far touch is a no-op) in test_rig; curves widget pixel-content
   paint check in test_anim.
 
+### Implemented and tested — M11 polish (session 3)
+
+- Theme switching: File > Load Theme... applies a .haltheme (the
+  format and parser existed since M2); the snapshot render options
+  refresh with the theme. examples/themes/daylight.haltheme ships as
+  the second look.
+- Example projects (examples/, reload-verified by the generator):
+  tool-sword.halcyon (a simple tool), prop-crate.halcyon (a crate on
+  a barrel with materials), character-wave.halcyon (a rigged, skinned
+  and keyframed limb with a looping wave clip). Generator:
+  scripts/gen_examples.c via scripts/gen-examples.sh.
+- Documentation: docs/shortcuts.md (every binding by mode) and
+  docs/user-guide.md (a start-to-export walkthrough). FBX assessed
+  and declined for v0.1 (docs/decisions.md D-015: ASCII FBX is
+  poorly imported, binary FBX is a multi-week format effort; glTF
+  covers the need).
+- Bugs the examples found and fixed (with regressions): the material
+  'texture -1' line failed an unsigned parse; the weights block was
+  saved before the mesh block so weighted projects could not reload
+  (test_project_armature_round_trip now binds weights before saving
+  and asserts they survive the round trip).
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -543,6 +565,12 @@ case; noted below).
 
 ## Log
 
+- **2026-11-18 — session 3, item 6: M11 polish.** Theme switching
+  with a shipped Daylight theme; reload-verified example projects
+  (tool/prop/animated character); shortcuts + user-guide docs; FBX
+  honestly declined (D-015). Two format bugs fixed with regressions
+  (texture -1 parse, weights-before-mesh save order). 2186 headless
+  checks total.
 - **2026-11-18 — session 3, item 4: curve editor + weight painting.**
   Eased channel graphs widget (read-only) and the weight-paint brush
   (falloff, renormalization, stroke undo, Shift subtract). 2145

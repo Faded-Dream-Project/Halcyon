@@ -1,0 +1,20 @@
+halcyon-theme 1
+name "Daylight"
+
+color window #eef0f6
+color panel #e2e5ee
+color panel_title #d5d9e6
+color border #b8bed0
+color text #2a2d3a
+color text_dim #6b7085
+color accent #6a5acd
+color accent_text #ffffff
+color widget #cfd4e2
+color widget_hover #c0c7da
+color widget_active #b2bad1
+color select #6a5acd70
+color viewport_bg #dfe3ec
+color viewport_grid #aeb5c8
+color success #3f9f74
+color warning #a2833f
+color danger #b0525f

@@ -6,6 +6,18 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — M11 polish (2026-11-18, session 3)
+
+- Theme switching (File > Load Theme; a Daylight theme ships in
+  examples/themes/).
+- Example projects in examples/: a tool, a prop, and an animated
+  character — generated and reload-verified by scripts/gen_examples.
+- docs/shortcuts.md (every binding) and docs/user-guide.md (a
+  start-to-export walkthrough).
+- Fixed with regressions: material texture -1 parsing and the
+  weights-before-mesh save order (weighted projects could not
+  reload). FBX assessed and declined for v0.1 (docs/decisions.md).
+
 ### Added — curve editor + weight painting (2026-11-18, session 3)
 
 - Curve editor panel: per-channel value-over-time graphs with the
