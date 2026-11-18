@@ -6,6 +6,26 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — M5: export/import (2026-11-18)
+
+- glTF 2.0 GLB export (meshes, normals, TRS + hierarchy) and import
+  (own JSON DOM parser; common accessor subset; flattened
+  transforms). OBJ export/import (global numbering, n-gons,
+  relative indices). Binary STL export. Round-trip tests (51
+  checks). File menu: Export glTF/OBJ/STL, Import glTF/OBJ.
+
+### Added — M4: mesh modeling (2026-11-18)
+
+- Mesh selection + picking; edit mode (Tab, 1/2/3, shift-extend);
+  operators: extrude, inset, bevel, loop cut, subdivide, merge,
+  delete, mirror, flip/recalc normals, smooth shading — all
+  undoable through snapshot-swap commands; move gizmo with axis
+  handles; modal rotate/scale; edit overlays; all six primitives in
+  the Add menu; project format v2 with meshes (90 new checks).
+  Fixed: the cube primitive was inward-wound since M3 (invisible
+  under backface culling), loop-cut midpoint placement, a subdivide
+  heap overflow.
+
 ### Added — M3: 3D viewport (2026-11-18)
 
 - Mesh structure (verts/edges/polygon faces) + cube, sphere, plane,

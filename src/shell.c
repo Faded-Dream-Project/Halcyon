@@ -6,6 +6,7 @@
 #include "shell.h"
 #include "core/mesh.h"
 #include "core/mesh_ops.h"
+#include "io/io.h"
 #include "core/project.h"
 #include "render/pick.h"
 #include "render/raster.h"
@@ -398,6 +399,95 @@ static bool op_recalc(hal_mesh *m, void *user) {
     return true;
 }
 
+/* ---- Export / import ---- */
+
+typedef struct export_req {
+    hal_app *app;
+    int format; /* 0 glb, 1 obj, 2 stl */
+} export_req;
+
+static void export_done(char *path, void *user) {
+    export_req *req = user;
+    hal_app *app = req->app;
+    int format = req->format;
+    free(req);
+    if (!path) {
+        set_status(app, "Export cancelled");
+        return;
+    }
+    char err[256] = { 0 };
+    hal_result r = HAL_ERR_IO;
+    if (format == 0)
+        r = hal_io_gltf_export(app->scene, path, err, sizeof(err));
+    else if (format == 1)
+        r = hal_io_obj_export(app->scene, path, err, sizeof(err));
+    else if (format == 2)
+        r = hal_io_stl_export(app->scene, path, err, sizeof(err));
+    if (r == HAL_OK)
+        set_status(app, "Exported %s", path);
+    else
+        set_status(app, "Export failed: %s",
+                   err[0] ? err : "I/O error");
+    free(path);
+}
+
+static void export_as(hal_app *app, int format) {
+    export_req *req = malloc(sizeof(*req));
+    if (!req)
+        return;
+    req->app = app;
+    req->format = format;
+    const char *title = format == 0 ? "Export glTF"
+                        : format == 1 ? "Export OBJ"
+                                      : "Export STL";
+    const char *filter = format == 0 ? "*.glb"
+                         : format == 1 ? "*.obj"
+                                       : "*.stl";
+    if (hal_ok(hal_dialog_save_file(app->platform, title, filter,
+                                    "model.glb", export_done, req,
+                                    app->window)))
+        set_status(app, "Choose the export location...");
+    else
+        free(req);
+}
+
+static void import_done(char *path, void *user) {
+    hal_app *app = user;
+    if (!path) {
+        set_status(app, "Import cancelled");
+        return;
+    }
+    char err[256] = { 0 };
+    hal_scene *loaded = NULL;
+    hal_result r = HAL_ERR_IO;
+    size_t n = strlen(path);
+    if (n > 4 && strcmp(path + n - 4, ".glb") == 0)
+        r = hal_io_gltf_import(path, &loaded, err, sizeof(err));
+    else if (n > 4 && strcmp(path + n - 4, ".obj") == 0)
+        r = hal_io_obj_import(path, &loaded, err, sizeof(err));
+    else {
+        set_status(app, "Import: unsupported file type");
+        free(path);
+        return;
+    }
+
+    if (r == HAL_OK && loaded) {
+        hal_scene_destroy(app->scene);
+        app->scene = loaded;
+        hal_undo_stack_clear(app->undo);
+        app->edit_mode = false;
+        app->project_path[0] = '\0';
+        app->dirty = true;
+        rebuild_outliner(app);
+        refresh_properties(app);
+        set_status(app, "Imported %s", path);
+    } else {
+        set_status(app, "Import failed: %s",
+                   err[0] ? err : "bad file");
+    }
+    free(path);
+}
+
 /* ---- Menus ---- */
 
 static void menu_action(hal_widget *menubar, int menu, int item,
@@ -412,6 +502,13 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, file, "Open...", "Ctrl+O", menu_action, app);
     hal_menu_item_add(bar, file, "Save", "Ctrl+S", menu_action, app);
     hal_menu_item_add(bar, file, "Save As...", NULL, menu_action, app);
+    hal_menu_item_add(bar, file, NULL, NULL, NULL, NULL);
+    hal_menu_item_add(bar, file, "Export glTF (.glb)...", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, file, "Export OBJ...", NULL, menu_action, app);
+    hal_menu_item_add(bar, file, "Export STL...", NULL, menu_action, app);
+    hal_menu_item_add(bar, file, "Import glTF/OBJ...", NULL,
+                      menu_action, app);
     hal_menu_item_add(bar, file, NULL, NULL, NULL, NULL);
     hal_menu_item_add(bar, file, "Quit", "Ctrl+Q", menu_action, app);
 
@@ -605,6 +702,21 @@ static void menu_action(hal_widget *menubar, int menu, int item,
                                  dialog_save_done, app, app->window);
             break;
         case 5:
+            export_as(app, 0);
+            break;
+        case 6:
+            export_as(app, 1);
+            break;
+        case 7:
+            export_as(app, 2);
+            break;
+        case 8:
+            if (hal_ok(hal_dialog_open_file(
+                    app->platform, "Import model", "*.glb;*.obj",
+                    import_done, app, app->window)))
+                set_status(app, "Choose a file to import...");
+            break;
+        case 10:
             hal_app_quit(app);
             break;
         default:

@@ -44,9 +44,12 @@
 
 ## Current state
 
-**M0, M1, M2 and M3 complete** (2026-11-18). Milestones M4–M11: not
-started (the founding session ended at the M3/M4 boundary; everything
-below is the honest record of where to resume).
+**M0–M5 complete** (2026-11-18). M5 = mesh modeling (edit mode, all
+operators, gizmo, undoable) + export/import (glTF 2.0 GLB, OBJ, STL;
+glTF/OBJ import, round-trip tested). Next up: M6 materials & UVs (PBR
+materials, texture slots, unwrap, UV editor; extend the glTF export
+with materials), then M7 rigging. Resume from src/ui/ (UV editor
+widget) and src/core/material.*.
 
 ### Implemented and tested
 
@@ -201,17 +204,70 @@ below is the honest record of where to resume).
   rather than its output (stack overflow, ASan), a stale-binary smoke
   run, sphere face-count arithmetic in a test.
 
-### Known issues (honest, carried into M4)
+### Implemented and tested — M4: mesh modeling (2026-11-18)
 
-- The sphere primitive's face winding is inconsistent: flat shading
-  renders correctly but some smooth (per-vertex) normals point inward.
-  First M4 task: fix primitive windings and pin smooth normals ==
-  radial in the tests.
-- Far-plane frustum culling is extracted but not verified by a test
-  (near/side culling is); add the [0,1]-NDC far-plane check in M4.
-- The live viewport's cube placement within the frame was verified
-  only by region sampling, not exact-position assertions; tighten with
-  a golden-frame test when M4 adds object picking.
+- Selection state (per vert/edge/face bytes, grown with the arrays),
+  hal_mesh_clone for undo snapshots, and the operators: extrude
+  (per face along its normal), inset, edge bevel (manifold
+  single-edge), loop cut (quad-ring walk, cut across the ring),
+  subdivide (shared midpoints + centers, selection-aware), merge to
+  centroid, delete verts/faces, mirror (winding-consistent), flip
+  winding, rebuild edges, recalc normals. All operator results
+  outward-normal-verified.
+- Picking: Möller–Trumbore face rays, scene-depth object picking,
+  projected vert/edge picking.
+- Edit mode in the editor: Tab, 1/2/3 selection modes, click select
+  with shift-extend, overlays (selected verts/edges/faces), every
+  operator on a menu + shortcut through one undoable path (snapshot
+  + swap command). Move gizmo with axis handles (screen-space hit
+  test, depth-correct world-per-pixel dragging). Modal R/S rotate
+  (world Y) and uniform scale with click-confirm/Esc-cancel.
+- Per-object smooth shading (per-vertex lambert interpolation in the
+  rasterizer); project format v2 saves meshes and the smooth flag
+  (v1 files still load). Add menu: all six primitives.
+- Tests: test_model (90 checks). Bugs the tests caught: the cube
+  primitive had been INWARD-WOUND since M3 (invisible under correct
+  backface culling; M3's screenshot checks had mistaken grid lines
+  for the cube — all primitives now outward-verified), loop cut put
+  midpoints on the wrong edges, subdivide read past its keep array
+  (heap overflow, ASan).
+
+### Implemented and tested — M5: export/import (2026-11-18)
+
+- glTF 2.0 GLB export: nodes with TRS + hierarchy, per-mesh
+  primitives with FLOAT positions, per-corner FLOAT normals (face
+  normals when flat-shaded — position stream duplicated per corner;
+  vertex normals when smooth), UNSIGNED_INT indices, one BIN chunk,
+  POSITION min/max. Hand-rolled JSON writer with string escaping.
+- glTF GLB import: a minimal recursive-descent JSON DOM parser
+  (objects/arrays/strings with escapes incl. \uXXXX, numbers,
+  bools), GLB chunk parsing, accessor/bufferView resolution over
+  FLOAT/UNSIGNED_INT/SHORT/BYTE, node-chain walking with accumulated
+  world transforms (hierarchy flattened on import), triangulated
+  faces, non-indexed primitives supported.
+- OBJ export (global vertex numbering, n-gon faces, one o per
+  object) and import (global indices, negative relative indices,
+  unknown-line skipping). STL binary export (all visible meshes
+  baked to world space, true facet normals).
+- File menu: Export glTF/OBJ/STL, Import glTF/OBJ.
+- Tests: test_io (51 checks — GLB structure + round trips with
+  transform/hierarchy verification, OBJ round trip with relative
+  indices, STL structure/size/facet checks, corrupt-file refusal).
+  The round trip caught a real bug: OBJ export used global vertex
+  numbering while the importer reset per object (multi-object files
+  failed to re-import).
+- Materials and UVs are NOT in the exporters yet (they arrive with
+  M6, per the revised roadmap).
+
+### Known issues (honest, carried forward)
+
+- Extrude/inset operate per face (adjacent selected faces extrude
+  with seams between the duplicates); region-aware extrude is a later
+  refinement. Bevel handles single manifold edges only (vertex
+  bevels out of scope). glTF import flattens node hierarchies into
+  world transforms (parenting is baked; geometry exact).
+- The move gizmo drags along world axes only; screen-plane drag and
+  rotate/scale gizmos are future polish (R/S modal covers them).
 
 ### Not implemented (honest list)
 
@@ -243,6 +299,11 @@ below is the honest record of where to resume).
 
 ## Log
 
+- **2026-11-18 — M5 complete.** glTF 2.0/GLB + OBJ + STL export,
+  glTF + OBJ import, round-trip tested (1024 headless checks total).
+- **2026-11-18 — M4 complete.** Mesh modeling: selection, picking,
+  edit mode, 12 operators, move gizmo, modal rotate/scale, smooth
+  shading, project format v2.
 - **2026-11-18 — M3 complete.** Mesh data structure + six primitives,
   orbit camera with ray/frustum math, depth-buffered CPU rasterizer,
   the viewport renderer (grid, solid/wireframe, gizmo) wired into the
