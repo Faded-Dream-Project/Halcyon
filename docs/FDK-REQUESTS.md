@@ -11,44 +11,53 @@ Format: `R-### status — title`.
 
 ---
 
-## R-001 open — GPU drawing surface (GL/Vulkan) for the 3D viewport
+## R-001 ANSWERED (2026-11-18) — GPU drawing surface
 
-**What.** A way for an application to render with OpenGL/Vulkan into
-a region of an FDK window, presented by FDK alongside the CPU-painted
-UI.
+**Deleted as a request.** FDK 1.0.0 already ships a real GPU draw
+path; the earlier "blocked on FDK" reading was wrong. What FDK does
+NOT have is a GL *sub-rect* of a normal fdk_window — but it does not
+need one for Halcyon: the extension-surface GL lane runs the whole
+editor window on the GPU, with the UI composited via fdk_texture.
+The API actually used (paths + line numbers from the installed
+headers, /home/z/my-project/fdk-install/include/fdk/):
 
-**Why.** Halcyon's M3 viewport ships as a CPU rasterizer (decision
-D-007) — deterministic, headless-testable, and smooth on the target
-hardware at editor sizes. The roadmap leaves a GPU renderer open for
-later. FDK today rasterizes every pixel on the CPU itself: its GL/EGL
-lanes are *present* lanes (they upload finished CPU frames), and the
-extension API's `fdk_ext_gl_make_current` exists but is documented for
-extension *surfaces* (own native windows), not for a sub-rect of a
-normal application window.
+- fdk_extend.h:992-1014 — "GL for add-ons (P2: a real API, not a
+  recipe)": fdk_ext_gl_make_current(surface),
+  fdk_ext_gl_set_frame_callback(surface, fn, user),
+  fdk_ext_gl_swap, fdk_ext_gl_fence_insert/wait. The callback runs
+  from FDK's frame scheduling with the OWNING window's lane GL
+  context CURRENT on the surface's native drawable: draw, return,
+  FDK swaps. "The callback replaces the paint engine for that
+  window's buffer — software content rides fdk_texture if mixed."
+- fdk_extend.h:162-171 — FDK_EXT_CAP_GL: the EGL/GLX presentation
+  lane actually initialized (hardware GL, not a refused software
+  renderer).
+- fdk_extend.h:285-353 — fdk_ext_register_kind +
+  fdk_ext_surface_create: the add-on's create callback builds the
+  native surface (X11: XCreateWindow; Wayland: wl_compositor +
+  role), FDK adopts it and routes the full fdk_event_data stream
+  (configure, expose, focus, pointer, keys, close).
+- fdk_surface.h:661-681 — fdk_texture_create/update/draw/destroy:
+  app-owned RGBA pixels composited into any fdk_surface in EVERY
+  render mode; in GPU mode "uploads into the window's lane context
+  at draw time (cached per texture) and draws as a batched-machinery
+  quad".
+- fdk_core.h:53-79 — FDK_RENDER_GPU: the lane is REQUIRED; the
+  classic framebuffer path is disabled; window creation FAILS
+  (FDK_ERR_UNSUPPORTED) if the GL stack cannot initialize — "never a
+  silent fallback". Selected via fdk_init_options.render_mode or
+  FDK_RENDER=gpu.
 
-**Status of the seam today.** FDK's extension API does expose native
-display/surface handles (`fdk_ext_get_native_display`,
-`fdk_ext_surface_native`), so a Halcyon-owned GL surface is reachable
-in principle — but composing it *inside* the main window means a
-separate native child window (a subsurface on Wayland), which fights
-the single-window architecture (D-001) and HiDPI compositing.
+Minimal shape (as used in src/platform/gpu_window.c):
 
-**Proposed API (sketch).**
-```c
-/* Render into a rect of an existing fdk_surface-backed window with a
- * caller-owned GL context; FDK composites the result under the CPU
- * frame at present time. */
-fdk_result fdk_window_gl_region(fdk_window *win, fdk_rect region,
-                                fdk_gl_region **out);
-/* Make the region's context current on the UI thread; draw; FDK's
- * next fdk_surface_present() composites the region. */
-fdk_result fdk_gl_region_make_current(fdk_gl_region *r);
-fdk_result fdk_gl_region_swap(fdk_gl_region *r);
-```
-**Fallback in the meantime.** CPU rasterizer only; the viewport
-already meets the performance target without GL.
-
----
+    fdk_init(&ctx, &(fdk_init_options){ .app_id = ..., .render_mode =
+        FDK_RENDER_GPU });
+    fdk_ext_register_kind(ctx, "halcyon-editor", &ops, app, &kind);
+    fdk_ext_surface_create(kind, &surf);        /* create cb: XCreateWindow */
+    fdk_ext_gl_set_frame_callback(surf, frame, app);  /* lane ctx current */
+    /* frame(): GL draws the 3D scene, then
+       fdk_texture_draw(render_target, ui_texture, rect) composites
+       the CPU-painted UI; FDK swaps. */
 
 ## R-002 open — text rasterization into caller-owned memory
 

@@ -44,6 +44,24 @@
 
 ## Current state
 
+**STEP 0 (2026-11-18, session 6) — FDK HAS a GPU API; the old
+"blocked" note was wrong.** FDK 1.0.0 exposes a real GPU draw path
+(not merely a present lane): extension surfaces get a per-frame GL
+callback with FDK's lane context CURRENT (fdk_extend.h:992-1014 —
+fdk_ext_gl_make_current / fdk_ext_gl_set_frame_callback /
+fdk_ext_gl_swap / fences; gated by FDK_EXT_CAP_GL, fdk_extend.h:162),
+the add-on creates the native window in a kind's create callback
+(fdk_extend.h:285-353), CPU-painted content rides fdk_texture
+(fdk_surface.h:661-681), and FDK_RENDER_GPU (fdk_core.h:53-79) makes
+the lane REQUIRED with no CPU fallback (creation fails honestly).
+docs/FDK-REQUESTS.md R-001 is rewritten accordingly (deleted as a
+request). Verified the symbols ship in libfdk.so (nm: FDK_1.0 tag).
+Halcyon's GPU-only viewport therefore does NOT need the sub-rect API
+the old note asked for: the editor window becomes an extension
+surface, 3D renders with raw GL in the frame callback, and Halcyon's
+own UI painter renders to an fdk_texture composited as the last pass
+(exactly the intended architecture).
+
 **PRE-ALPHA — NOT READY FOR USE.** Both former tags (v0.1.0, v0.2.0)
 were DELETED on 2026-11-18 after a real-desktop screenshot showed
 the editor UI is visibly broken at 1920x1080 (vertically clipped
