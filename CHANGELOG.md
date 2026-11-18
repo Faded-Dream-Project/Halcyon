@@ -6,6 +6,25 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — M1: core (2026-11-18)
+
+- Math library: f32 vec2/3/4, column-major mat4, unit quaternions —
+  dot/cross/normalize, lerp, axis-angle, Euler<->quat, TRS
+  compose/decompose, general inverse, perspective/ortho (NDC z
+  [0,1]), look_at, slerp. Right-handed, Y-up, glTF-compatible
+  conventions.
+- Scene graph: stable ids, TRS transforms, parenting with cycle
+  rejection, cached world matrices with dirty propagation,
+  selection/visibility.
+- Undo/redo: command stack (push-after-mutation contract), bounded
+  depth, labels, leak-free by construction and by test.
+- `.halcyon` project format v1 (docs/project-format.md): strict
+  fail-closed parser, exact float round-trips, atomic saves.
+- Autosave: interval schedule, dirty tracking, mtime-based crash
+  recovery detection.
+- Tests: test_math (85 checks), test_scene (43), test_undo (52),
+  test_project (57, includes autosave).
+
 ### Added — M0: repo foundation (2026-11-18)
 
 - Repository skeleton: `src/platform`, `src/ui`, `src/core`, `src/render`,

@@ -44,7 +44,7 @@
 
 ## Current state
 
-**M0 complete** (2026-11-18). Milestones M1–M11: not started.
+**M0 and M1 complete** (2026-11-18). Milestones M2–M11: not started.
 
 ### Implemented and tested
 
@@ -85,13 +85,45 @@
     was additionally verified pixel-wise (gradient endpoints exact,
     wordmark ink present, empty regions clean).
 
+### Implemented and tested — M1: core (2026-11-18)
+
+- **Math library** (`src/core/math.h`, `math.c`): vec2/3/4 (f32), vec2i,
+  column-major mat4 (v' = M·v), unit quaternions (x y z w). Dot/cross/
+  normalize (zero-safe), lerp, axis-angle, Euler XYZ <-> quaternion,
+  TRS compose and decompose (with shear detection and negative-scale
+  handling), general 4x4 inverse (degenerate input -> identity),
+  perspective/ortho with NDC z in [0,1] (glTF-style), right-handed
+  look_at, quaternion slerp (short-arc). Conventions documented in the
+  header and docs/decisions.md D-005.
+- **Scene graph** (`src/core/scene.h/c`): flat object array with stable
+  unique ids, glTF TRS local transforms, parenting with cycle rejection
+  (set_parent refuses self/descendant/unknown), removal re-parents
+  children upward, cached world matrices with subtree dirty
+  propagation, selection and visibility. Object types declared for
+  mesh/armature/camera/light; payloads attach in later milestones.
+- **Undo/redo** (`src/core/undo.h/c`): command pattern — push-after-
+  mutation (documented contract), apply/revert over an owned state
+  blob, bounded depth with oldest-first eviction, redo stack cleared on
+  push, labels for UI menus, no-leak guarantees on every path (held to
+  by ASan).
+- **Project format** (`src/core/project.h/c` + docs/project-format.md):
+  `.halcyon` version 1 — strict fail-closed parser with line-numbered
+  errors (unknown keys, bad numbers, forward parent references, broken
+  blocks all refuse), exact float round-trips (%.9g), atomic save
+  (temp + fsync + rename). Round-trip tested.
+- **Autosave** (`src/core/autosave.h/c`): dirty tracking, interval-
+  scheduled writes through the atomic project save, retry-on-failure
+  without busy-looping, crash-recovery detection by mtime comparison.
+
 ### Not implemented (honest list)
 
-- Everything M1–M11: math library, scene graph, undo/redo, project
-  files, autosave, the widget/UI system, the 3D viewport, modeling,
-  materials/UVs, rigging, animation, import/export, game-asset
-  workflow, preview rendering, shortcuts/preferences/example
-  projects.
+- Everything M2–M11: the widget/UI system, the 3D viewport, modeling
+  (meshes are not yet representable in the project file — format
+  version 1 has objects and transforms only), materials/UVs, rigging,
+  animation, import/export, game-asset workflow, preview rendering,
+  shortcuts/preferences/example projects.
+- The M1 core is not yet wired into the application (main.c still runs
+  the M0 placeholder scene); it lands behind the M2 UI's editor shell.
 - Touch, tablet, gesture and drag-and-drop events are not yet
   forwarded from the platform (the FDK side delivers them; Halcyon
   will map them when a feature needs them).
@@ -102,5 +134,12 @@
 
 ## Log
 
+- **2026-11-18 — M1 complete.** Math library, scene graph, undo/redo,
+  .halcyon project format (documented, atomic, strict), autosave with
+  crash-recovery detection. 278 headless checks across five suites
+  (math 85, platform 41, project 57, scene 43, undo 52). Three real
+  bugs found and fixed by the tests: a wrong Euler-extraction
+  convention, a broken slerp basis formula, and autosave's first-save
+  schedule contradicting its documentation.
 - **2026-11-18 — M0 complete.** Foundation, platform layer, both test
   tiers, docs, CI. First push.
