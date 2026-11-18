@@ -68,6 +68,7 @@ int main(int argc, char **argv) {
     const char *screenshot = NULL;
     bool ui_audit = false;
     bool zorder_test = false;
+    bool entries_test = false;
     int audit_w = 1920, audit_h = 1080;
     int win_w = 1280, win_h = 800; /* --size overrides any mode */
     hal_f32 audit_scale = 0.0f; /* 0 = the window's real scale */
@@ -81,6 +82,8 @@ int main(int argc, char **argv) {
             win_h = atoi(argv[++i]);
         } else if (strcmp(argv[i], "--test-zorder") == 0) {
             zorder_test = true;
+        } else if (strcmp(argv[i], "--test-entries") == 0) {
+            entries_test = true;
         } else if (strcmp(argv[i], "--ui-audit") == 0) {
             ui_audit = true;
             if (i + 1 < argc)
@@ -156,6 +159,13 @@ int main(int argc, char **argv) {
                 frame.presented_once = true;
                 frame.need_redraw = false;
             }
+        }
+
+        if (entries_test && frame.presented_once) {
+            int rc = hal_app_run_entries_test(frame.app,
+                                              frame.surface);
+            audit_exit_code = rc == 0 ? 0 : 3;
+            hal_app_quit(frame.app);
         }
 
         if (zorder_test && frame.presented_once) {

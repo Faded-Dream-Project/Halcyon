@@ -41,6 +41,9 @@ for cfg in "1920 1080 1.0" "1920 1080 2.0" "1366 768 1.0" \
         "$APP" --ui-audit "$1" "$2" "$3" || status=$?
 done
 
+echo "test-display: property entries regression"
+DISPLAY=":$disp" LSAN_OPTIONS="suppressions=$SUPP"     "$APP" --test-entries || status=$?
+
 echo "test-display: z-order regression"
 DISPLAY=":$disp" LSAN_OPTIONS="suppressions=$SUPP" \
     "$APP" --test-zorder || status=$?

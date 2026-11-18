@@ -271,8 +271,13 @@ static void refresh_properties(hal_app *app) {
             app->metallic_value = mat->metallic;
             app->rough_value = mat->roughness;
         } else {
-            for (int i = 0; i < 3; i++)
-                app->mat_buf[i][0] = '\0';
+            /* No material bound = the DEFAULT material: show its
+             * effective values (white, metal 0, rough 0.5) instead
+             * of empty fields — the real-screenshot report had the
+             * Color entries blank exactly here. */
+            snprintf(app->mat_buf[0], sizeof(app->mat_buf[0]), "1.00");
+            snprintf(app->mat_buf[1], sizeof(app->mat_buf[1]), "1.00");
+            snprintf(app->mat_buf[2], sizeof(app->mat_buf[2]), "1.00");
             app->metallic_value = 0.0f;
             app->rough_value = 0.5f;
         }
@@ -3869,5 +3874,111 @@ int hal_app_run_zorder_test(hal_app *app, hal_surface *surface) {
            "command (scene %zu -> %zu)\n",
            panel_n, before, after);
     hal_surface_destroy(off);
+    return 0;
+}
+
+/* ---- STEP-1b regression: property entries must show their text ---
+ * With a mesh selected the Name/Location/Color entries carry the
+ * object's values; this asserts the BUFFERS are filled AND text ink
+ * is present inside each entry's rect. Returns 0 = pass. */
+int hal_app_run_entries_test(hal_app *app, hal_surface *surface) {
+    (void)surface;
+    if (!app)
+        return 1;
+
+    /* A selection must exist (the startup Cube). */
+    hal_object *obj =
+        hal_scene_object(app->scene, hal_scene_selected(app->scene));
+    if (!obj) {
+        fprintf(stderr, "entries: FAIL - no selected object\n");
+        return 1;
+    }
+    refresh_properties(app);
+
+    struct {
+        const char *what;
+        hal_widget *w;
+        const char *buf;
+    } fields[] = {
+        { "Name", app->name_entry, app->name_buf },
+        { "Location.x", app->loc_entry[0], app->loc_buf[0] },
+        { "Location.y", app->loc_entry[1], app->loc_buf[1] },
+        { "Location.z", app->loc_entry[2], app->loc_buf[2] },
+        { "Color.r", app->mat_entry[0], app->mat_buf[0] },
+        { "Color.g", app->mat_entry[1], app->mat_buf[1] },
+        { "Color.b", app->mat_entry[2], app->mat_buf[2] },
+    };
+    int fails = 0;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        if (!fields[i].buf || !fields[i].buf[0]) {
+            printf("entries: FAIL - %s buffer is empty\n",
+                   fields[i].what);
+            fails++;
+        }
+        if (!fields[i].w) {
+            printf("entries: FAIL - %s has no widget\n",
+                   fields[i].what);
+            fails++;
+        }
+    }
+    if (fails)
+        return 1;
+
+    /* Paint the frame offscreen (deterministic pixels; stride is in
+     * fdk_u32 units). */
+    hal_size ws;
+    if (!hal_ok(hal_window_get_size(app->window, &ws)) ||
+        ws.width <= 0 || ws.height <= 0)
+        return 1;
+    hal_surface *off = NULL;
+    if (!hal_ok(hal_surface_offscreen_create((int)ws.width,
+                                             (int)ws.height, &off)))
+        return 1;
+    hal_canvas canvas;
+    hal_app_paint_frame(app, off, &canvas);
+    if (!canvas.surface) {
+        hal_surface_destroy(off);
+        return 1;
+    }
+    hal_u32 *px = (hal_u32 *)canvas.pixels;
+    size_t stride = (size_t)canvas.stride;
+
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        hal_rectf r = hal_widget_abs_rect(fields[i].w);
+        if (r.width < 8.0f || r.height < 8.0f) {
+            printf("entries: FAIL - %s has no rect (%.0fx%.0f)\n",
+                   fields[i].what, r.width, r.height);
+            fails++;
+            continue;
+        }
+        /* Text ink: bright pixels (the theme's text is
+         * 0xe8e4f8; the entry widget bg is ~0x2a3364). */
+        long ink = 0;
+        for (hal_i32 y = (hal_i32)r.y; y < (hal_i32)(r.y + r.height);
+             y++)
+            for (hal_i32 x = (hal_i32)r.x;
+                 x < (hal_i32)(r.x + r.width); x++) {
+                if (x < 0 || y < 0 ||
+                    x >= (hal_i32)canvas.width ||
+                    y >= (hal_i32)canvas.height)
+                    continue;
+                hal_u32 p = px[(size_t)y * stride + (size_t)x];
+                int rr = (int)(p & 0xFFu), gg = (int)((p >> 8) & 0xFFu),
+                    bb = (int)((p >> 16) & 0xFFu);
+                if (rr + gg + bb > 500)
+                    ink++;
+            }
+        if (ink < 4) {
+            printf("entries: FAIL - %s shows no text ink (%ld px; "
+                   "buffer \"%s\")\n",
+                   fields[i].what, ink, fields[i].buf);
+            fails++;
+        }
+    }
+    hal_surface_destroy(off);
+    if (fails)
+        return 1;
+    printf("entries: PASS - all 7 property entries carry values and "
+           "text ink\n");
     return 0;
 }

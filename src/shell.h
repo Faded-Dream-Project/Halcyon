@@ -53,6 +53,9 @@ int hal_app_run_ui_audit(hal_app *app, hal_surface *surface,
  * checks pixel ownership + input priority. 0 = pass. */
 int hal_app_run_zorder_test(hal_app *app, hal_surface *surface);
 
+/* STEP-1b regression: property entries show their text. 0 = pass. */
+int hal_app_run_entries_test(hal_app *app, hal_surface *surface);
+
 /* Advances clip playback (call every loop iteration with a monotonic
  * clock); marks the UI dirty while playing. */
 void hal_app_tick(hal_app *app, double now_seconds);
