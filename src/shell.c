@@ -4,6 +4,7 @@
  */
 
 #include "shell.h"
+#include "ui/ui_internal.h"
 #include "core/anim.h"
 #include "core/armature.h"
 #include "core/material.h"
@@ -29,7 +30,10 @@
 #define SHELL_MENUBAR_H 30.0f
 #define SHELL_STATUSBAR_H 26.0f
 #define SHELL_TIMELINE_H 64.0f
-#define SHELL_TOOLBAR_W 42.0f
+/* Wide enough for checkbox + label + padding in the narrow rail
+ * (the column layout fills children to the rail's width; 42 clipped
+ * "Wire"/"Paint" text). */
+#define SHELL_TOOLBAR_W 76.0f
 #define SHELL_SIDEBAR_W 240.0f
 #define SHELL_VIEWPORT_MIN 100.0f
 
@@ -102,6 +106,7 @@ struct hal_app {
 
     /* The context hint line + the first-run quick start. */
     hal_widget *hint;
+    hal_widget *rail; /* the left tool rail (layout-owned rect) */
     bool quickstart_shown;
 
     /* Edit-mode vertex grab (with proportional falloff). */
@@ -2035,6 +2040,7 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
     /* Tool rail (left edge): shading mode for now; the M4 tools join
      * it as real operators land. */
     hal_widget *rail = hal_column_create(hal_ui_root(app->ui));
+    app->rail = rail;
     hal_toggle_create(rail, "Wire", &app->wireframe);
     hal_toggle_create(rail, "Paint", &app->paint_mode);
 
@@ -2053,34 +2059,42 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
     hal_label_create(name_row, "Name");
     app->name_entry = hal_entry_create(name_row, app->name_buf,
                                        sizeof(app->name_buf));
+    hal_widget_set_expand(app->name_entry, true);
     hal_entry_set_on_change(app->name_entry, on_name_changed, app);
 
+    /* Location: a label line, then the three fields on a full-width
+     * row (a label beside the fields left them 38px each — too
+     * narrow for their own "0.000"). */
+    hal_label_create(props_col, "Location");
     hal_widget *loc_row = hal_row_create(props_col);
-    hal_label_create(loc_row, "Location");
     for (int i = 0; i < 3; i++) {
         app->loc_entry[i] = hal_entry_create(loc_row, app->loc_buf[i],
                                              sizeof(app->loc_buf[i]));
+        hal_widget_set_expand(app->loc_entry[i], true);
         hal_entry_set_on_change(app->loc_entry[i], on_loc_changed, app);
     }
 
     /* Material section + the UV editor (bound on selection). */
     hal_widget *mat_panel = hal_panel_create(sidebar, "Material");
     hal_widget *mat_col = hal_column_create(mat_panel);
+    hal_label_create(mat_col, "Color");
     hal_widget *col_row = hal_row_create(mat_col);
-    hal_label_create(col_row, "Color");
     for (int i = 0; i < 3; i++) {
         app->mat_entry[i] = hal_entry_create(col_row, app->mat_buf[i],
                                              sizeof(app->mat_buf[i]));
+        hal_widget_set_expand(app->mat_entry[i], true);
         hal_entry_set_on_change(app->mat_entry[i], on_mat_changed, app);
     }
     hal_widget *mr_row = hal_row_create(mat_col);
     hal_label_create(mr_row, "Metal");
     app->metallic_slider =
         hal_slider_create(mr_row, 0.0f, 1.0f, &app->metallic_value);
+    hal_widget_set_expand(app->metallic_slider, true);
     hal_widget *rg_row = hal_row_create(mat_col);
     hal_label_create(rg_row, "Rough");
     app->rough_slider =
         hal_slider_create(rg_row, 0.0f, 1.0f, &app->rough_value);
+    hal_widget_set_expand(app->rough_slider, true);
 
     hal_widget *uv_panel = hal_panel_create(sidebar, "UV Editor");
     app->uvview = hal_uvview_create(uv_panel);
@@ -2930,6 +2944,18 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
         }
         return true;
     }
+    if (event->type == HAL_EVENT_POINTER_SCROLL) {
+        /* Over the sidebar: scroll its panels; the wheel zooms only
+         * over the viewport. */
+        hal_rectf sb = hal_widget_rect(app->sidebar_panel);
+        if (px >= sb.x && px < sb.x + sb.width && py >= sb.y &&
+            py < sb.y + sb.height) {
+            hal_widget_scroll_by(
+                app->sidebar_panel,
+                event->scroll.delta_y > 0 ? 48.0f : -48.0f);
+            return true;
+        }
+    }
     if (event->type == HAL_EVENT_POINTER_SCROLL && in_vp) {
         hal_f32 f = event->scroll.delta_y > 0.0f ? 1.1f : 0.9f;
         hal_camera_zoom(&app->camera, f);
@@ -3160,11 +3186,29 @@ static void layout_shell(hal_app *app, hal_f32 w, hal_f32 h) {
                         (hal_rectf){ sidebar_x, mbar.height, w - sidebar_x,
                                     body_h });
 
-    hal_widget *status = app->status;
-    hal_sizef status_m = hal_widget_measured(status);
+    /* The tool rail owns the left strip beside the viewport (its
+     * children flow inside). It previously had NO rect — the
+     * Wire/Paint toggles painted into empty clips and could not be
+     * clicked at all. */
+    if (app->rail)
+        hal_widget_set_rect(
+            app->rail,
+            (hal_rectf){ 0, mbar.height + 4.0f, SHELL_TOOLBAR_W,
+                         body_h - 8.0f });
+
+    /* Status + hint get FULL-WIDTH strips: measured widths are 0
+     * until the first measure pass runs (after layout reads them),
+     * which drew the first frame's status text into zero-width
+     * clips. Labels left-align, so the full width is safe. */
     hal_widget_set_rect(
-        status, (hal_rectf){ 8, h - SHELL_STATUSBAR_H, status_m.width,
-                             SHELL_STATUSBAR_H });
+        app->status,
+        (hal_rectf){ 8, h - SHELL_STATUSBAR_H + 4.0f, w - 16.0f,
+                     SHELL_STATUSBAR_H - 6.0f });
+    if (app->hint)
+        hal_widget_set_rect(
+            app->hint,
+            (hal_rectf){ 8, h - SHELL_STATUSBAR_H - 18.0f, w - 16.0f,
+                         16.0f });
 
     hal_ui_layout(app->ui);
 }
@@ -3318,14 +3362,51 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
         return;
     hal_window_get_scale(app->window, &scale);
 
-    hal_ui_set_scale(app->ui, scale);
-    layout_shell(app, (hal_f32)win_size.width, (hal_f32)win_size.height);
-
     hal_canvas canvas;
     if (!hal_canvas_init(&canvas, surface, scale))
         return;
 
+    /* Layout in LOGICAL units from the surface (physical / scale) —
+     * never the raw window size, which need not match at HiDPI. */
+    hal_sizef logical = hal_canvas_size(&canvas);
+    hal_ui_set_scale(app->ui, scale);
+    layout_shell(app, logical.width, logical.height);
+
     hal_ui_paint(app->ui, &canvas);
+
+    /* A quiet panel strip behind the status + hint lines so the
+     * bottom of the window reads as one bar. AFTER the UI paint:
+     * the root's own fill repaints the whole window and would erase
+     * a strip painted before it. */
+    {
+        const hal_theme *t = hal_ui_theme(app->ui);
+        hal_canvas_fill_rect(
+            &canvas,
+            (hal_rectf){ 0, logical.height - SHELL_STATUSBAR_H,
+                         logical.width, SHELL_STATUSBAR_H },
+            t->colors[HAL_THEME_PANEL]);
+        hal_canvas_draw_line(
+            &canvas, 0, logical.height - SHELL_STATUSBAR_H,
+            logical.width, logical.height - SHELL_STATUSBAR_H,
+            t->colors[HAL_THEME_BORDER]);
+        /* The labels again, on top of the strip. */
+        hal_widget *status = app->status;
+        if (status && status->visible) {
+            hal_font *font =
+                hal_ui_font(app->ui, t->font_size);
+            if (font) {
+                hal_font_metrics m;
+                hal_font_get_metrics(font, &m);
+                hal_rectf r = status->abs_rect;
+                hal_canvas_draw_text(
+                    &canvas, font, status->text,
+                    strlen(status->text), r.x,
+                    hal__baseline(r.y, r.height, &m,
+                                  hal_ui_scale(app->ui)),
+                    t->colors[HAL_THEME_TEXT]);
+            }
+        }
+    }
 
     /* The 3D view renders into its rect over the UI's empty middle. */
     paint_viewport(app, &canvas);
@@ -3545,4 +3626,36 @@ const char *hal_app_project_path(const hal_app *app) {
 
 bool hal_app_dirty(const hal_app *app) {
     return app ? app->dirty : false;
+}
+
+/* ---- STEP-2 audit entry ------------------------------------------
+ * Paints the whole editor into the given surface with the audit
+ * overlay active (every draw_text ink rect vs the clip stack; every
+ * menu popup vs its widest item). forced_scale > 0 overrides the
+ * window scale so HiDPI layouts are testable on a 1.0 display.
+ * Returns the violation count; each is also printed to stderr. */
+int hal_app_run_ui_audit(hal_app *app, hal_surface *surface,
+                         hal_f32 forced_scale) {
+    if (!app || !surface)
+        return -1;
+    hal_size ws;
+    if (!hal_ok(hal_window_get_size(app->window, &ws)))
+        return -1;
+    hal_f32 scale = forced_scale;
+    if (scale <= 0.0f) {
+        scale = 1.0f;
+        hal_window_get_scale(app->window, &scale);
+    }
+
+    hal_canvas canvas;
+    if (!hal_canvas_init(&canvas, surface, scale)) {
+        return -1;
+    }
+    hal_f32 saved = hal_ui_scale(app->ui);
+    hal_ui_set_scale(app->ui, scale);
+    hal_sizef logical = hal_canvas_size(&canvas);
+    layout_shell(app, logical.width, logical.height);
+    int violations = hal__ui_audit(app->ui, &canvas);
+    hal_ui_set_scale(app->ui, saved);
+    return violations;
 }

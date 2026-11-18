@@ -39,9 +39,17 @@ hal_sizef hal_canvas_size(const hal_canvas *canvas) {
 
 static const hal_rectf HAL_RECTF_INF = { -1e9f, -1e9f, 2e9f, 2e9f };
 
+bool hal_canvas_push_clip_scroll(hal_canvas *canvas, hal_rectf rect) {
+    bool ok = hal_canvas_push_clip(canvas, rect);
+    if (ok && canvas->clip_count > 0)
+        canvas->clip_scroll[canvas->clip_count - 1] = true;
+    return ok;
+}
+
 bool hal_canvas_push_clip(hal_canvas *canvas, hal_rectf rect) {
     if (canvas->clip_count >= HAL_CANVAS_CLIP_DEPTH)
         return false;
+    canvas->clip_scroll[canvas->clip_count] = false;
     if (rect.width <= 0.0f || rect.height <= 0.0f)
         rect = (hal_rectf){ 0, 0, 0, 0 }; /* empty intersection */
     if (canvas->clip_count > 0) {
@@ -467,12 +475,54 @@ void hal_canvas_fill_triangle(hal_canvas *canvas, hal_pointf a,
     }
 }
 
+void hal_canvas_set_text_audit(hal_canvas *canvas,
+                               hal_canvas_text_audit_fn fn,
+                               void *user) {
+    if (!canvas)
+        return;
+    canvas->audit_fn = fn;
+    canvas->audit_user = user;
+}
+
 void hal_canvas_draw_text(hal_canvas *canvas, hal_font *font,
                           const char *utf8, size_t byte_len,
                           hal_f32 pen_x, hal_f32 baseline_y,
                           hal_color color) {
     if (!canvas->surface || !font || !utf8 || byte_len == 0)
         return;
+
+    /* The audit: the text's full ink rectangle must fit the clip.
+     * Runs before the platform call so it also fires for text the
+     * platform would cull entirely. */
+    if (canvas->audit_fn) {
+        hal_font_metrics fm;
+        hal_font_get_metrics(font, &fm);
+        hal_text_metrics tm;
+        hal_f32 adv = 0.0f;
+        if (hal_ok(hal_font_measure(font, utf8, byte_len, &tm)))
+            adv = (hal_f32)tm.advance_width / canvas->scale;
+        hal_f32 asc = (hal_f32)fm.ascent / canvas->scale;
+        hal_f32 desc = (hal_f32)fm.descent / canvas->scale;
+        hal_rectf ink = { pen_x, baseline_y - asc, adv, asc + desc };
+        hal_rectf clip = canvas->clip_count > 0
+                             ? canvas->clip[canvas->clip_count - 1]
+                             : (hal_rectf){ 0, 0, 1e9f, 1e9f };
+        /* Tolerance: sub-pixel rounding only. Any real clip of ink
+         * is a violation. */
+        const hal_f32 tol = 0.75f;
+        if (ink.x < clip.x - tol || ink.y < clip.y - tol ||
+            ink.x + ink.width > clip.x + clip.width + tol ||
+            ink.y + ink.height > clip.y + clip.height + tol) {
+            /* A cut at a scrollable region's fold is correct
+             * scrolling, not clipped layout. */
+            bool scroll = false;
+            for (int i = 0; i < canvas->clip_count; i++)
+                if (canvas->clip_scroll[i])
+                    scroll = true;
+            canvas->audit_fn(canvas->audit_user, utf8, ink, clip,
+                             scroll);
+        }
+    }
 
     hal_f32 s = canvas->scale;
     hal_i32 px = (hal_i32)(pen_x * s + 0.5f);
@@ -491,7 +541,11 @@ void hal_canvas_draw_text(hal_canvas *canvas, hal_font *font,
 hal_f32 hal_canvas_measure_text(hal_canvas *canvas, hal_font *font,
                                 const char *utf8, size_t byte_len) {
     hal_text_metrics m;
-    if (!hal_font_measure(font, utf8, byte_len, &m))
+    /* hal_font_measure returns hal_result (HAL_OK == 0): the old
+     * !result test inverted the check and returned 0 for every
+     * SUCCESSFUL measure — shortcut columns, button centering and
+     * entry carets all laid out against zero-width text. */
+    if (!hal_ok(hal_font_measure(font, utf8, byte_len, &m)))
         return 0.0f;
     return (hal_f32)m.advance_width / canvas->scale;
 }

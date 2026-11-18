@@ -12,8 +12,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-static hal_f32 row_height(const hal_theme *t) {
-    return (hal_f32)t->font_size_small + 8.0f;
+static hal_f32 row_height(hal_ui *ui) {
+    /* Real metrics: a taller face must never be clipped by its own
+     * row. */
+    return hal__text_row_h(ui, ui->theme->font_size_small) + 10.0f;
 }
 
 static size_t count_visible_rows(hal_tree_row *row, bool *overflow) {
@@ -35,10 +37,9 @@ static size_t count_visible_rows(hal_tree_row *row, bool *overflow) {
 void hal__tree_measure(hal_widget *w) {
     if (!w->ui)
         return;
-    const hal_theme *t = w->ui->theme;
     bool overflow = false;
     size_t n = count_visible_rows(w->s.tree.roots, &overflow);
-    w->s.tree.content_height = (hal_f32)n * row_height(t);
+    w->s.tree.content_height = (hal_f32)n * row_height(w->ui);
     w->measured.width = 140.0f;
     w->measured.height = w->s.tree.content_height;
 }
@@ -149,7 +150,7 @@ static hal_f32 layout_rows(hal_tree_row *row, hal_f32 y, hal_f32 rh) {
 }
 
 void hal__tree_layout_rows(hal_widget *w) {
-    layout_rows(w->s.tree.roots, w->abs_rect.y, row_height(w->ui->theme));
+    layout_rows(w->s.tree.roots, w->abs_rect.y, row_height(w->ui));
 }
 
 /* A flat cursor over VISIBLE rows (respecting expansion), in y order:
@@ -191,8 +192,7 @@ static hal_tree_row *row_cursor_next(row_cursor *cur) {
 
 /* The visible row at window-y, or NULL. */
 hal_tree_row *hal__tree_row_at(hal_widget *w, hal_f32 y) {
-    const hal_theme *t = w->ui->theme;
-    hal_f32 rh = row_height(t);
+    hal_f32 rh = row_height(w->ui);
     hal__tree_layout_rows(w);
     row_cursor cur;
     row_cursor_begin(&cur, w);
@@ -222,9 +222,7 @@ static void paint_row(hal_ui *ui, hal_widget *w, hal_tree_row *row,
 
     hal_f32 indent = 6.0f + (hal_f32)row->depth * 14.0f;
     hal_f32 text_x = w->abs_rect.x + indent + 16.0f;
-    hal_f32 baseline =
-        row_rect.y + (rh + (hal_f32)(fm->ascent - fm->descent)) * 0.5f -
-        (hal_f32)fm->ascent;
+    hal_f32 baseline = hal__baseline(row_rect.y, rh, fm, w->ui->scale);
 
     if (row->first_child) {
         hal_f32 cx = w->abs_rect.x + indent + 6.0f;
@@ -253,7 +251,7 @@ static void paint_row(hal_ui *ui, hal_widget *w, hal_tree_row *row,
 
 void hal__tree_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
     const hal_theme *t = ui->theme;
-    hal_f32 rh = row_height(t);
+    hal_f32 rh = row_height(w->ui);
     hal_font *font = hal__ui_font(ui, t->font_size_small);
     if (!font)
         return;
@@ -274,9 +272,8 @@ void hal__tree_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
 hal_rectf hal_tree_row_rect(hal_widget *tree, const hal_tree_row *row) {
     if (!tree || tree->kind != HAL_WIDGET_TREE || !row)
         return (hal_rectf){ 0, 0, 0, 0 };
-    const hal_theme *t = tree->ui->theme;
     hal__tree_layout_rows(tree);
-    hal_f32 rh = row_height(t);
+    hal_f32 rh = row_height(tree->ui);
     return (hal_rectf){ tree->abs_rect.x, row->y, tree->abs_rect.width, rh };
 }
 

@@ -66,11 +66,27 @@ static double now_seconds(void) {
 int main(int argc, char **argv) {
     bool smoke = false;
     const char *screenshot = NULL;
+    bool ui_audit = false;
+    int audit_w = 1920, audit_h = 1080;
+    int win_w = 1280, win_h = 800; /* --size overrides any mode */
+    hal_f32 audit_scale = 0.0f; /* 0 = the window's real scale */
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--smoke") == 0)
             smoke = true;
         else if (strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc)
             screenshot = argv[++i];
+        else if (strcmp(argv[i], "--size") == 0 && i + 2 < argc) {
+            win_w = atoi(argv[++i]);
+            win_h = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--ui-audit") == 0) {
+            ui_audit = true;
+            if (i + 1 < argc)
+                audit_w = atoi(argv[++i]);
+            if (i + 1 < argc)
+                audit_h = atoi(argv[++i]);
+            if (i + 1 < argc)
+                audit_scale = (hal_f32)atof(argv[++i]);
+        }
     }
 
     app_frame frame;
@@ -86,8 +102,8 @@ int main(int argc, char **argv) {
 
     hal_window_options wopts = {
         .title = "Halcyon",
-        .width = 1280,
-        .height = 800,
+        .width = ui_audit ? audit_w : win_w,
+        .height = ui_audit ? audit_h : win_h,
     };
     if (!hal_ok(hal_window_create(frame.platform, &wopts, &frame.window))) {
         fprintf(stderr, "halcyon: window create failed\n");
@@ -114,6 +130,7 @@ int main(int argc, char **argv) {
 
     const int smoke_timeout_ms = 10000;
     int waited_ms = 0;
+    int audit_exit_code = 0; /* set by --ui-audit (2 = violations) */
     while (hal_app_running(frame.app)) {
         int n = hal_platform_pump(frame.platform, 15);
         if (n < 0) {
@@ -138,6 +155,17 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (ui_audit && frame.presented_once) {
+            int violations = hal_app_run_ui_audit(frame.app,
+                                                  frame.surface,
+                                                  audit_scale);
+            printf("ui-audit: %d violation(s) at %dx%d scale %.2f\n",
+                   violations, audit_w, audit_h,
+                   audit_scale > 0 ? audit_scale : 1.0f);
+            audit_exit_code = violations > 0 ? 2 : 0;
+            hal_app_quit(frame.app);
+        }
+
         if (smoke) {
             waited_ms += 15;
             hal_size size_now = { 0, 0 };
@@ -146,10 +174,12 @@ int main(int argc, char **argv) {
                 size_now.width > 0;
             if (frame.presented_once && size_ok) {
                 hal_rectf vp = hal_app_viewport_rect(frame.app);
+                hal_f32 sc = 1.0f;
+                hal_window_get_scale(frame.window, &sc);
                 printf("smoke: %dx%d window painted and presented; "
-                       "viewport %.0fx%.0f\n",
+                       "viewport %.0fx%.0f scale=%.2f\n",
                        size_now.width, size_now.height, vp.width,
-                       vp.height);
+                       vp.height, sc);
                 if (screenshot) {
                     if (hal_ok(hal_surface_save_png(frame.surface,
                                                     screenshot)))
@@ -173,5 +203,5 @@ int main(int argc, char **argv) {
     hal_app_destroy(frame.app);
     hal_window_destroy(frame.window);
     hal_platform_shutdown(frame.platform);
-    return 0;
+    return audit_exit_code;
 }

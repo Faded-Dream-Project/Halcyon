@@ -9,9 +9,9 @@
 hal_camera hal_camera_default(void) {
     hal_camera cam = {
         .target = hal_vec3f_zero(),
-        .distance = 6.0f,
-        .yaw = 0.6f,
-        .pitch = 0.42f,
+        .distance = 4.6f,
+        .yaw = 0.785398f,  /* 45 degrees: the classic 3/4 view */
+        .pitch = 0.55f,
         .fov_y = 50.0f * HAL_DEG2RAD_f32,
         .near_z = 0.05f,
         .far_z = 500.0f,

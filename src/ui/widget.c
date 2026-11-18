@@ -280,3 +280,25 @@ void hal_widget_set_tooltip(hal_widget *w, const char *text) {
             strcpy(w->tooltip, text);
     }
 }
+
+bool hal_widget_scroll_by(hal_widget *column, hal_f32 dy) {
+    if (!column || column->kind != HAL_WIDGET_COLUMN)
+        return false;
+    hal_f32 max_scroll =
+        column->s.column.content_height - column->rect.height;
+    if (max_scroll < 0.0f)
+        max_scroll = 0.0f;
+    hal_f32 want = column->s.column.scroll + dy;
+    if (want < 0.0f)
+        want = 0.0f;
+    if (want > max_scroll)
+        want = max_scroll;
+    if (want == column->s.column.scroll)
+        return false;
+    column->s.column.scroll = want;
+    if (column->ui) {
+        hal_ui_layout(column->ui);
+        column->ui->needs_paint = true;
+    }
+    return true;
+}

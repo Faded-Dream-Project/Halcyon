@@ -42,6 +42,13 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event);
  * viewport animates. */
 void hal_app_paint(hal_app *app, hal_surface *surface);
 
+/* STEP-2 audit: paints with the text/popup audit overlay (every
+ * draw_text ink rect vs the clip stack, every popup vs its widest
+ * item); returns the violation count, also printed to stderr.
+ * forced_scale > 0 overrides the window scale (HiDPI testing). */
+int hal_app_run_ui_audit(hal_app *app, hal_surface *surface,
+                         hal_f32 forced_scale);
+
 /* Advances clip playback (call every loop iteration with a monotonic
  * clock); marks the UI dirty while playing. */
 void hal_app_tick(hal_app *app, double now_seconds);

@@ -115,26 +115,8 @@ test: $(TEST_BIN)
 # (started directly — xvfb-run needs xauth, which not every minimal
 # image carries). Skips with a clear message when Xvfb is absent.
 test-display: $(APP)
-	@if command -v Xvfb >/dev/null 2>&1; then \
-		disp=90; \
-		while [ -e /tmp/.X$$disp-lock ] || [ -e /tmp/.X11-unix/X$$disp ]; do \
-			disp=$$((disp + 1)); \
-		done; \
-		Xvfb :$$disp -screen 0 1280x800x24 >/dev/null 2>&1 & \
-		xvfb_pid=$$!; \
-		for i in 1 2 3 4 5 6 7 8 9 10; do \
-			[ -e /tmp/.X11-unix/X$$disp ] && break; \
-			sleep 0.2; \
-		done; \
-		DISPLAY=:$$disp LSAN_OPTIONS=suppressions=$(CURDIR)/tests/data/lsan-fdk.supp \
-			$(realpath $(APP)) --smoke; \
-		status=$$?; \
-		kill $$xvfb_pid 2>/dev/null; \
-		wait $$xvfb_pid 2>/dev/null; \
-		exit $$status; \
-	else \
-		echo "test-display: Xvfb not found, skipping (install xvfb to run)"; \
-	fi
+	@HAL_CYON_SUPP="$(CURDIR)/tests/data/lsan-fdk.supp"; \
+	HAL_UI_ALT_FONT="$${HAL_UI_ALT_FONT:-}" sh $(CURDIR)/tests/run-display-tier.sh $(realpath $(APP)) "$$HAL_CYON_SUPP"
 
 clean:
 	rm -rf $(BUILD_DIR)

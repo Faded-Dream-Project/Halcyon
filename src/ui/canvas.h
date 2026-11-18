@@ -33,7 +33,26 @@ extern "C" {
 
 #define HAL_CANVAS_CLIP_DEPTH 32
 
+/* ---- STEP-2 audit hook ----
+ * When set, EVERY draw_text is checked: the text's full ink rect
+ * (pen_x .. pen_x+advance, baseline-ascent .. baseline+descent,
+ * logical px, from the REAL font metrics) must lie inside the
+ * current clip stack. Any clip fires the callback with both rects.
+ * The paint walk is unchanged; this is a verification overlay. */
+typedef void (*hal_canvas_text_audit_fn)(void *user,
+                                         const char *utf8,
+                                         hal_rectf text_rect,
+                                         hal_rectf clip_rect,
+                                         bool scroll_boundary);
+
 typedef struct hal_canvas {
+    /* STEP-2 audit (see hal_canvas_set_text_audit). */
+    hal_canvas_text_audit_fn audit_fn;
+    void *audit_user;
+    /* Per-stack-entry: this clip is a SCROLLABLE region's boundary
+     * (an overflowing column). The audit exempts ink cut at scroll
+     * folds — that is correct scrolling, not clipped layout. */
+    bool clip_scroll[HAL_CANVAS_CLIP_DEPTH];
     hal_u32 *pixels;      /* physical framebuffer                     */
     hal_i32 width;        /* physical pixels                          */
     hal_i32 height;
@@ -110,5 +129,11 @@ hal_f32 hal_canvas_measure_text(hal_canvas *canvas, hal_font *font,
 #ifdef __cplusplus
 }
 #endif
+
+void hal_canvas_set_text_audit(hal_canvas *canvas,
+                               hal_canvas_text_audit_fn fn,
+                               void *user);
+/* Like push_clip, but marks the region as a scrollable boundary. */
+bool hal_canvas_push_clip_scroll(hal_canvas *canvas, hal_rectf rect);
 
 #endif /* HAL_CANVAS_H */

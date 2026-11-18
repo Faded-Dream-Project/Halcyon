@@ -69,34 +69,41 @@ void hal__widget_measure(hal_widget *w) {
         break; /* the shell sizes the root */
     case HAL_WIDGET_LABEL:
         w->measured.width = text_width(ui, t->font_size, w->text) + pad;
-        w->measured.height = (hal_f32)t->font_size + pad * 0.5f;
+        w->measured.height =
+            hal__text_row_h(ui, t->font_size) + pad * 0.5f;
         break;
     case HAL_WIDGET_BUTTON:
         w->measured.width =
             text_width(ui, t->font_size, w->text) + pad * 2.5f;
-        w->measured.height = (hal_f32)t->font_size + pad * 1.2f;
+        w->measured.height =
+            hal__text_row_h(ui, t->font_size) + pad * 1.2f;
         break;
     case HAL_WIDGET_TOGGLE: {
         hal_f32 box = (hal_f32)t->font_size + 4.0f;
         w->measured.width =
             box + t->gap + text_width(ui, t->font_size, w->text) + pad;
-        w->measured.height = (hal_f32)t->font_size + pad * 0.5f;
+        w->measured.height =
+            hal__text_row_h(ui, t->font_size) + pad * 0.5f;
         break;
     }
     case HAL_WIDGET_SLIDER:
         w->measured.width = 90.0f;
-        w->measured.height = (hal_f32)t->font_size + pad;
+        w->measured.height = hal__text_row_h(ui, t->font_size) + pad;
         break;
     case HAL_WIDGET_ENTRY:
         w->measured.width =
             text_width(ui, t->font_size, w->s.entry.buf) + pad * 2.0f;
         if (w->measured.width < 80.0f)
             w->measured.width = 80.0f;
-        w->measured.height = (hal_f32)t->font_size + pad * 0.8f;
+        w->measured.height =
+            hal__text_row_h(ui, t->font_size) + pad * 0.8f;
         break;
     case HAL_WIDGET_PANEL: {
         hal_sizef inner = measure_row_children(w, true);
-        hal_f32 title = w->text[0] ? (hal_f32)t->font_size + 8.0f : 0.0f;
+        hal_f32 title =
+            w->text[0]
+                ? hal__text_row_h(w->ui, t->font_size) + 8.0f
+                : 0.0f;
         w->measured.width = inner.width + pad;
         w->measured.height = inner.height + title + pad * 0.5f;
         break;
@@ -106,7 +113,7 @@ void hal__widget_measure(hal_widget *w) {
         w->measured = measure_row_children(w, w->kind == HAL_WIDGET_COLUMN);
         break;
     case HAL_WIDGET_TABS: {
-        hal_f32 strip = (hal_f32)t->font_size + 10.0f;
+        hal_f32 strip = hal__text_row_h(w->ui, t->font_size) + 10.0f;
         hal_f32 width = 0.0f, height = strip;
         for (hal_widget *c = w->first_child; c; c = c->next) {
             width += text_width(ui, t->font_size, c->text) + pad * 2.0f;
@@ -135,7 +142,8 @@ void hal__widget_measure(hal_widget *w) {
         for (hal_widget *c = w->first_child; c; c = c->next)
             width += text_width(ui, t->font_size, c->text) + pad * 2.0f;
         w->measured.width = width;
-        w->measured.height = (hal_f32)t->font_size + 10.0f;
+        w->measured.height =
+            hal__text_row_h(ui, t->font_size) + 10.0f;
         break;
     }
     }
@@ -170,6 +178,13 @@ static void arrange_row_children(hal_widget *w, bool vertical) {
     hal_f32 avail =
         vertical ? w->rect.height - pad * 2.0f : w->rect.width - pad * 2.0f;
 
+    /* Columns scroll when their stacked content overflows the rect
+     * (the sidebar on small logical surfaces). The scroll is clamped
+     * once the stack height is known, below. */
+    hal_f32 scroll = vertical && w->kind == HAL_WIDGET_COLUMN
+                         ? w->s.column.scroll
+                         : 0.0f;
+
     /* Fixed-size children take their measured extent; expand children
      * share whatever is left. */
     hal_f32 fixed = 0.0f;
@@ -195,14 +210,18 @@ static void arrange_row_children(hal_widget *w, bool vertical) {
         if (share < 0.0f)
             share = 0.0f;
     }
+    /* No leftover: expand children keep their measured extent — the
+     * stack overflows and scrolls rather than collapsing to 0
+     * (0-size widgets made their headers clip to empty rects). */
+    bool no_leftover = expand_count > 0 && avail <= fixed;
 
-    hal_f32 pos = pad;
+    hal_f32 pos = pad - scroll;
     for (hal_widget *c = w->first_child; c; c = c->next) {
         if (!c->visible)
             continue;
         if (vertical) {
             hal_f32 h = c->expand
-                            ? share
+                            ? (no_leftover ? c->measured.height : share)
                             : c->measured.height;
             c->rect = (hal_rectf){ pad, pos, w->rect.width - pad * 2.0f, h };
             pos += h + gap;
@@ -211,6 +230,22 @@ static void arrange_row_children(hal_widget *w, bool vertical) {
             c->rect = (hal_rectf){ pos, pad, wd, w->rect.height - pad * 2.0f };
             pos += wd + gap;
         }
+    }
+    if (vertical && w->kind == HAL_WIDGET_COLUMN) {
+        hal_f32 stacked = pad * 2.0f;
+        for (hal_widget *c = w->first_child; c; c = c->next)
+            if (c->visible)
+                stacked += c->rect.height + gap;
+        if (stacked > gap + pad * 2.0f)
+            stacked -= gap;
+        w->s.column.content_height = stacked;
+        hal_f32 max_scroll = stacked - w->rect.height;
+        if (max_scroll < 0.0f)
+            max_scroll = 0.0f;
+        if (w->s.column.scroll > max_scroll)
+            w->s.column.scroll = max_scroll;
+        if (w->s.column.scroll < 0.0f)
+            w->s.column.scroll = 0.0f;
     }
 }
 
@@ -226,7 +261,10 @@ void hal__widget_arrange(hal_widget *w) {
         /* Top-level children are placed by the shell. */
         break;
     case HAL_WIDGET_PANEL: {
-        hal_f32 title = w->text[0] ? (hal_f32)t->font_size + 8.0f : 0.0f;
+        hal_f32 title =
+            w->text[0]
+                ? hal__text_row_h(w->ui, t->font_size) + 8.0f
+                : 0.0f;
         hal_f32 inner = pad * 0.5f;
         for (hal_widget *c = w->first_child; c; c = c->next) {
             c->rect = (hal_rectf){ inner, title + inner,
@@ -240,7 +278,7 @@ void hal__widget_arrange(hal_widget *w) {
         arrange_row_children(w, w->kind == HAL_WIDGET_COLUMN);
         break;
     case HAL_WIDGET_TABS: {
-        hal_f32 strip = (hal_f32)t->font_size + 10.0f;
+        hal_f32 strip = hal__text_row_h(w->ui, t->font_size) + 10.0f;
         hal_f32 x = 0.0f;
         for (hal_widget *c = w->first_child; c; c = c->next) {
             c->rect = (hal_rectf){ x, strip, w->rect.width,

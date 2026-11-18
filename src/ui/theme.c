@@ -82,7 +82,7 @@ hal_theme *hal_theme_default(void) {
     t->padding = 10.0f;
     t->gap = 6.0f;
     t->font_size = 16;
-    t->font_size_small = 13;
+    t->font_size_small = 14;
     return t;
 }
 

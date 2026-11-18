@@ -51,6 +51,58 @@ text, truncated menu popups, overflowing property rows, a wrongly
 projected ground grid). Nothing is a release; no tag or release
 will be created unless explicitly requested.
 
+**UI REPAIR (2026-11-18, session 5) — the reported defects are fixed
+and now GUARDED BY TESTS.** Root causes found and fixed:
+(1) every text site used a vertical-centering formula that drew text
+a full ASCENT too high (8 sites) — replaced by a shared
+metrics-based hal__baseline; (2) row/panel/tab/tree heights were
+sized from the nominal font px — now from REAL font metrics
+(hal__text_row_h), scale-aware (physical metrics / ui->scale);
+(3) the tool rail and hint bar never received layout rects — the
+Wire/Paint toggles were invisible AND unclickable; (4) the
+properties Location/Color rows overflowed the sidebar — fields now
+expand to share the row, rows restructured (label line + fields);
+(5) the sidebar now SCROLLS when panels overflow (small logical
+surfaces / HiDPI); (6) the ground grid's near-plane SEGMENT clip
+treated 2-point input as a closed polygon and dropped every line
+crossing the near plane (the "wrongly projected grid": only
+far-side lines survived) — plus unbounded Bresenham hung on the
+huge near-crossing coordinates (now Liang-Barsky clipped to the
+raster first); (7) hal_canvas_measure_text inverted the
+hal_font_measure success check — every measured width was 0
+(shortcut columns, button centering, entry carets); (8) menu
+popups now clip to their own rect; (9) layout runs in LOGICAL units
+from the canvas (surface/scale), never the raw window size;
+(10) the status/hint labels were zero-width on the first frame
+(measured sizes read before the first measure pass) — full-width
+strips; the status bar paints a panel strip + text after the UI
+pass. Camera defaults: a classic 3/4 view, closer (cube reads at a
+sane size); small font 13 -> 14.
+
+**VERIFICATION (how this was checked — and its limits).** A new
+STEP-2 audit hooks EVERY draw_text: the text's full ink rect (real
+ascent..descent, real advance) must fit the clip stack, and every
+menu popup must be at least as wide as its widest item. It runs
+headless in `make test` (test_uilayout: a shell-mirroring UI at
+1920x1080/1366x768/1280x720 x scale 1.0/2.0 — 28 checks) and on
+the REAL app in `make test-display` (--ui-audit at the same six
+configs plus an alternate font face via HAL_UI_FONT). All 0
+violations. The grid has a geometric regression test (projected
+grid intersections must have ink at their projected pixels). Pixels
+were also verified programmatically in the saved screenshots
+(scripts/verify-screens.py: no ink in the window's top rows, menubar
+text present, cube + grid ink in the viewport, sidebar text, status
+strip + text). Screenshots: download/editor-{1920x1080,1366x768,
+1280x720}.png. **HONEST LIMITS:** this agent CANNOT view images (no
+image input in its environment) — all visual verification here is
+programmatic (metrics audits + pixel-color invariants), and the
+sandbox's font is fontconfig's DejaVu Sans (what a typical Linux
+desktop resolves; a user's desktop may resolve another face — hence
+the alternate-face audit runs). The reported grid distortion could
+not be reproduced geometrically BEFORE the fixes (the old camera
+survived the older checks by accident); the near-plane clip bug it
+exposed is real, fixed, and now guarded.
+
 Session 3 (2026-11-18): items 1-3 of the release plan DONE (all
 pushed). Item 1: glTF skins. Item 2: texture sampling + the
 barycentric-misbinding fix. Item 3 (M9 remainder): asset presets

@@ -4,6 +4,8 @@
 
 #include "ui_internal.h"
 
+#include <stdio.h>
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -70,6 +72,10 @@ void hal_ui_paint(hal_ui *ui, hal_canvas *canvas) {
     if (!ui || !canvas)
         return;
 
+    /* Every paint starts with a CLEAN clip stack (a reused canvas
+     * must not inherit stale pushes from a previous pass). */
+    canvas->clip_count = 0;
+
     /* A scale change between layout and paint re-measures everything;
      * the layout scale is part of the measurement. */
     if (canvas->scale != ui->scale) {
@@ -122,6 +128,21 @@ void hal_ui_layout(hal_ui *ui) {
 
 /* ---- Font cache ---- */
 
+hal_f32 hal__text_row_h(hal_ui *ui, hal_i32 px) {
+    hal_font *f = hal__ui_font(ui, px);
+    if (f) {
+        hal_font_metrics m;
+        hal_font_get_metrics(f, &m);
+        /* PHYSICAL metrics -> LOGICAL units (the font is loaded at
+         * px * scale; the layout is logical). */
+        hal_f32 h = (hal_f32)(m.ascent + m.descent) / ui->scale;
+        if (h < (hal_f32)px)
+            h = (hal_f32)px;
+        return h;
+    }
+    return (hal_f32)px + 2.0f; /* fontless fallback */
+}
+
 hal_font *hal__ui_font(hal_ui *ui, hal_i32 logical_px) {
     if (!ui || logical_px < 4)
         return NULL;
@@ -142,7 +163,19 @@ hal_font *hal__ui_font(hal_ui *ui, hal_i32 logical_px) {
     hal_i32 physical = (hal_i32)((hal_f32)logical_px * ui->scale + 0.5f);
     if (physical < 4)
         physical = 4;
-    hal_font *font = hal_font_system_default(physical);
+    /* HAL_UI_FONT=/path.ttf overrides the system default — used by
+     * the audit tier to verify layout against a different face. */
+    static const char *override_path;
+    static bool override_checked = false;
+    if (!override_checked) {
+        override_path = getenv("HAL_UI_FONT");
+        override_checked = true;
+    }
+    hal_font *font = NULL;
+    if (override_path && override_path[0])
+        font = hal_font_load(override_path, physical);
+    if (!font)
+        font = hal_font_system_default(physical);
     if (!font)
         return NULL;
 
@@ -151,4 +184,115 @@ hal_font *hal__ui_font(hal_ui *ui, hal_i32 logical_px) {
     ui->fonts[ui->font_count].font = font;
     ui->font_count++;
     return font;
+}
+
+/* ---- STEP-2 audit ---- */
+
+typedef struct ui_audit_state {
+    int violations;
+} ui_audit_state;
+
+static int g_ui_audit_pass = 0;
+static void ui_audit_text_cb(void *user, const char *utf8,
+                             hal_rectf text, hal_rectf clip,
+                             bool scroll_boundary) {
+    ui_audit_state *st = user;
+    (void)g_ui_audit_pass;
+    /* EMPTY clips (scrolled-out widgets) and cuts at a SCROLL fold
+     * are correct scrolling, not clipped layout. Everything else —
+     * ink outside a non-empty, non-scroll clip — is a violation. */
+    if (scroll_boundary)
+        return;
+    if (clip.width <= 0.75f || clip.height <= 0.75f)
+        return;
+    st->violations++;
+    char short_[48];
+    size_t n = strlen(utf8);
+    if (n > 40)
+        n = 40;
+    memcpy(short_, utf8, n);
+    short_[n] = 0;
+    fprintf(stderr,
+            "UIAUDIT clipped text: \"%s\" "
+            "ink=(%.1f,%.1f %.1fx%.1f) clip=(%.1f,%.1f %.1fx%.1f)\n",
+            short_, text.x, text.y, text.width, text.height, clip.x,
+            clip.y, clip.width, clip.height);
+}
+
+static hal_widget *find_menubar(hal_widget *w) {
+    for (hal_widget *c = w; c; c = c->next) {
+        if (c->kind == HAL_WIDGET_MENUBAR)
+            return c;
+        hal_widget *r = find_menubar(c->first_child);
+        if (r)
+            return r;
+    }
+    return NULL;
+}
+
+int hal__ui_audit(hal_ui *ui, hal_canvas *canvas) {
+    if (!ui || !canvas)
+        return -1;
+    ui_audit_state st = { 0 };
+    hal_canvas_set_text_audit(canvas, ui_audit_text_cb, &st);
+
+    g_ui_audit_pass = 0;
+    hal_ui_paint(ui, canvas);
+
+    /* Every menu, opened one at a time, re-painted. */
+    hal_widget *bar = find_menubar(ui->root);
+    if (bar) {
+        hal_menubar_data *data = hal__menubar_data(bar);
+        if (data) {
+            hal_font *font =
+                hal__ui_font(ui, ui->theme->font_size);
+            for (size_t m = 0; m < data->count; m++) {
+                ui->open_menubar = bar;
+                ui->open_menu_index = (int)m;
+                ui->menu_hover_item = -1;
+                g_ui_audit_pass++;
+                hal_ui_paint(ui, canvas);
+
+                /* Popup width >= widest item + its paddings. */
+                if (font) {
+                    hal_rectf popup = hal__menu_popup_rect(ui);
+                    hal_menu *menu = &data->menus[m];
+                    for (size_t it = 0; it < menu->count; it++) {
+                        if (!menu->items[it].text)
+                            continue; /* separator */
+                        hal_f32 need = 24.0f;
+                        hal_text_metrics tm;
+                        if (hal_ok(hal_font_measure(
+                                font, menu->items[it].text,
+                                strlen(menu->items[it].text), &tm)))
+                            need += (hal_f32)tm.advance_width /
+                                    ui->scale;
+                        if (menu->items[it].shortcut &&
+                            hal_ok(hal_font_measure(
+                                font, menu->items[it].shortcut,
+                                strlen(menu->items[it].shortcut),
+                                &tm)))
+                            need += 20.0f +
+                                    (hal_f32)tm.advance_width /
+                                        ui->scale;
+                        if (need > popup.width + 0.75f) {
+                            st.violations++;
+                            fprintf(stderr,
+                                    "UIAUDIT popup too narrow: menu"
+                                    " %zu item %zu \"%s\" needs"
+                                    " %.1f, popup %.1f\n",
+                                    m, it, menu->items[it].text, need,
+                                    popup.width);
+                        }
+                    }
+                }
+            }
+            ui->open_menubar = NULL;
+            ui->open_menu_index = -1;
+            g_ui_audit_pass++;
+            hal_ui_paint(ui, canvas);
+        }
+    }
+    hal_canvas_set_text_audit(canvas, NULL, NULL);
+    return st.violations;
 }

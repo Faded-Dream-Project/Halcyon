@@ -8,6 +8,8 @@
 
 #include "ui_internal.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 
 #include <string.h>
@@ -19,10 +21,8 @@ static void paint_label(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
         return;
     hal_font_metrics m;
     hal_font_get_metrics(font, &m);
-    hal_f32 baseline = w->abs_rect.y + (w->abs_rect.height +
-                                            (hal_f32)(m.ascent - m.descent)) /
-                                           2.0f -
-                       (hal_f32)m.ascent;
+    hal_f32 baseline = hal__baseline(w->abs_rect.y, w->abs_rect.height,
+                                     &m, ui->scale);
     hal_canvas_draw_text(canvas, font, w->text, strlen(w->text),
                          w->abs_rect.x, baseline, t->colors[HAL_THEME_TEXT]);
 }
@@ -44,10 +44,8 @@ static void paint_button(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
     hal_font_metrics m;
     hal_font_get_metrics(font, &m);
     hal_f32 cx = w->abs_rect.x + (w->abs_rect.width - text_w) * 0.5f;
-    hal_f32 baseline = w->abs_rect.y + (w->abs_rect.height +
-                                            (hal_f32)(m.ascent - m.descent)) /
-                                           2.0f -
-                       (hal_f32)m.ascent;
+    hal_f32 baseline = hal__baseline(w->abs_rect.y, w->abs_rect.height,
+                                     &m, ui->scale);
     hal_canvas_draw_text(canvas, font, w->text, strlen(w->text), cx,
                          baseline, t->colors[HAL_THEME_TEXT]);
 }
@@ -77,9 +75,8 @@ static void paint_toggle(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
         return;
     hal_font_metrics m;
     hal_font_get_metrics(font, &m);
-    hal_f32 baseline = w->abs_rect.y + 1.0f + box * 0.5f +
-                       (hal_f32)(m.ascent - m.descent) * 0.5f -
-                       (hal_f32)m.ascent;
+    hal_f32 baseline =
+        hal__baseline(w->abs_rect.y + 1.0f, box, &m, ui->scale);
     hal_canvas_draw_text(canvas, font, w->text, strlen(w->text),
                          checkbox.x + box + t->gap, baseline,
                          t->colors[HAL_THEME_TEXT]);
@@ -132,10 +129,8 @@ static void paint_entry(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
         return;
     hal_font_metrics m;
     hal_font_get_metrics(font, &m);
-    hal_f32 baseline =
-        w->abs_rect.y + (w->abs_rect.height - (hal_f32)m.line_height) *
-                            0.5f +
-        (hal_f32)m.ascent;
+    hal_f32 baseline = hal__baseline(w->abs_rect.y, w->abs_rect.height,
+                                     &m, ui->scale);
     hal_f32 pad = t->padding * 0.6f;
 
     const char *buf = w->s.entry.buf;
@@ -162,7 +157,7 @@ static void paint_panel(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
     hal_canvas_fill_rounded_rect(canvas, w->abs_rect, t->radius,
                                  t->colors[HAL_THEME_PANEL]);
     if (w->text[0]) {
-        hal_f32 title_h = (hal_f32)t->font_size + 8.0f;
+        hal_f32 title_h = hal__text_row_h(ui, t->font_size) + 8.0f;
         hal_rectf band = w->abs_rect;
         band.height = title_h;
         /* Square the band's bottom corners against the panel. */
@@ -178,9 +173,7 @@ static void paint_panel(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
             hal_font_get_metrics(font, &m);
             hal_canvas_draw_text(
                 canvas, font, w->text, strlen(w->text), w->abs_rect.x + 8.0f,
-                band.y + (title_h + (hal_f32)(m.ascent - m.descent)) *
-                             0.5f -
-                    (hal_f32)m.ascent,
+                hal__baseline(band.y, title_h, &m, ui->scale),
                 t->colors[HAL_THEME_TEXT_DIM]);
         }
     }
@@ -190,7 +183,7 @@ static void paint_panel(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
 
 static void paint_tabs(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
     const hal_theme *t = ui->theme;
-    hal_f32 strip = (hal_f32)t->font_size + 10.0f;
+    hal_f32 strip = hal__text_row_h(ui, t->font_size) + 10.0f;
     hal_f32 x = w->abs_rect.x;
     int index = 0;
 
@@ -211,8 +204,7 @@ static void paint_tabs(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
         hal_font_get_metrics(font, &m);
         hal_canvas_draw_text(
             canvas, font, c->text, strlen(c->text), tab.x + t->padding,
-            tab.y + (strip + (hal_f32)(m.ascent - m.descent)) * 0.5f -
-                (hal_f32)m.ascent,
+            hal__baseline(tab.y, strip, &m, ui->scale),
             active ? t->colors[HAL_THEME_TEXT]
                    : t->colors[HAL_THEME_TEXT_DIM]);
         x += tab_w;
@@ -259,10 +251,8 @@ static void paint_menubar(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
         hal_canvas_draw_text(
             canvas, font, data->menus[m].title,
             strlen(data->menus[m].title), x + t->padding,
-            w->abs_rect.y +
-                (w->abs_rect.height +
-                 (hal_f32)(fm.ascent - fm.descent)) * 0.5f -
-                (hal_f32)fm.ascent,
+            hal__baseline(w->abs_rect.y, w->abs_rect.height, &fm,
+                          ui->scale),
             t->colors[HAL_THEME_TEXT]);
         x += item_w;
     }
@@ -273,7 +263,11 @@ void hal__paint_widget(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
     if (!w || !w->visible)
         return;
 
-    hal_canvas_push_clip(canvas, w->abs_rect);
+    if (w->kind == HAL_WIDGET_COLUMN &&
+        w->s.column.content_height > w->abs_rect.height + 0.5f)
+        hal_canvas_push_clip_scroll(canvas, w->abs_rect);
+    else
+        hal_canvas_push_clip(canvas, w->abs_rect);
 
     switch (w->kind) {
     case HAL_WIDGET_ROOT:
@@ -337,9 +331,19 @@ void hal__paint_menu_overlay(hal_ui *ui, hal_canvas *canvas) {
     const hal_theme *t = ui->theme;
     hal_menu *menu = &data->menus[ui->open_menu_index];
     hal_rectf popup = hal__menu_popup_rect(ui);
-    hal_f32 item_h = (hal_f32)t->font_size + 10.0f;
+    hal_f32 item_h = hal__text_row_h(ui, t->font_size) + 10.0f;
 
-    /* Panel surface with a soft border; a faint shadow band under it. */
+    /* The popup OWNS its rectangle: everything it draws (shadow,
+     * panel, items) is clipped to it — no item text may spill
+     * outside, whatever the font. */
+    hal_rectf clip_pop = popup;
+    clip_pop.x -= 3.0f;
+    clip_pop.y -= 1.0f;
+    clip_pop.width += 6.0f;
+    clip_pop.height += 5.0f; /* room for the shadow band */
+    if (!hal_canvas_push_clip(canvas, clip_pop))
+        return;
+
     hal_rectf shadow = popup;
     shadow.x += 2.0f;
     shadow.y += 3.0f;
@@ -375,10 +379,7 @@ void hal__paint_menu_overlay(hal_ui *ui, hal_canvas *canvas) {
                                          t->colors[HAL_THEME_SELECT]);
         }
 
-        hal_f32 baseline = row.y + (row.height +
-                                    (hal_f32)(fm.ascent - fm.descent)) *
-                                       0.5f -
-                           (hal_f32)fm.ascent;
+        hal_f32 baseline = hal__baseline(row.y, row.height, &fm, ui->scale);
         hal_canvas_draw_text(canvas, font, item->text, strlen(item->text),
                              row.x + 10.0f, baseline,
                              t->colors[HAL_THEME_TEXT]);
@@ -392,6 +393,7 @@ void hal__paint_menu_overlay(hal_ui *ui, hal_canvas *canvas) {
                                  t->colors[HAL_THEME_TEXT_DIM]);
         }
     }
+    hal_canvas_pop_clip(canvas); /* the popup clip pushed above */
 }
 
 /* Tooltips appear once the pointer has rested on the same widget
@@ -425,7 +427,7 @@ void hal__paint_tooltip(hal_ui *ui, hal_canvas *canvas) {
     hal_text_metrics tm;
     hal_f32 tw = 8.0f * (hal_f32)strlen(text);
     if (hal_ok(hal_font_measure(font, text, strlen(text), &tm)))
-        tw = (hal_f32)tm.advance_width;
+        tw = (hal_f32)tm.advance_width / ui->scale;
     hal_f32 x = ui->last_pointer.x + 12.0f;
     hal_f32 y = ui->last_pointer.y + 18.0f;
     hal_rectf box = { x - 4.0f, y - 12.0f, tw + 10.0f, 20.0f };

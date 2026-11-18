@@ -4,6 +4,7 @@
 
 #include "render.h"
 
+
 #include "../core/armature.h"
 #include "../core/material.h"
 #include "../platform/platform.h"
@@ -44,6 +45,47 @@ static size_t clip_near(clip_vertex *poly, size_t n, size_t cap) {
     size_t m = 0;
     if (cap > CLIP_MAX)
         cap = CLIP_MAX;
+
+    /* SEGMENTS are not closed polygons: the polygon path below
+     * walks (i, (i+1)%n) and would emit the near-plane crossing
+     * TWICE for a 2-point input (once per "edge"), yielding 3
+     * vertices — which callers checking n == 2 dropped. Every grid
+     * or wireframe line crossing the near plane vanished (the
+     * 1920x1080 "wrongly projected grid": only far-side lines
+     * survived). Clip segments open: one crossing, two vertices. */
+    if (n == 2) {
+        hal_f32 d0 = poly[0].pos.w - 1e-4f;
+        hal_f32 d1 = poly[1].pos.w - 1e-4f;
+        if (d0 < 0.0f && d1 < 0.0f)
+            return 0;
+        if (d0 >= 0.0f && d1 >= 0.0f)
+            return 2;
+        hal_f32 t = d0 / (d0 - d1);
+        clip_vertex x;
+        x.pos = hal_vec4f_make(
+            poly[0].pos.x +
+                (poly[1].pos.x - poly[0].pos.x) * t,
+            poly[0].pos.y +
+                (poly[1].pos.y - poly[0].pos.y) * t,
+            poly[0].pos.z +
+                (poly[1].pos.z - poly[0].pos.z) * t,
+            poly[0].pos.w +
+                (poly[1].pos.w - poly[0].pos.w) * t);
+        x.normal = hal_vec3f_lerp(poly[0].normal,
+                                  poly[1].normal, t);
+        x.intensity = poly[0].intensity +
+                      (poly[1].intensity - poly[0].intensity) * t;
+        x.uv = (hal_vec2f){
+            poly[0].uv.x + (poly[1].uv.x - poly[0].uv.x) * t,
+            poly[0].uv.y + (poly[1].uv.y - poly[0].uv.y) * t
+        };
+        if (d0 >= 0.0f) {
+            poly[1] = x;
+        } else {
+            poly[0] = x;
+        }
+        return 2;
+    }
     for (size_t i = 0; i < n; i++) {
         clip_vertex cur = poly[i];
         clip_vertex nxt = poly[(i + 1) % n];

@@ -127,7 +127,7 @@ hal_rectf hal__menu_popup_rect(hal_ui *ui) {
     hal_menu *menu = &data->menus[ui->open_menu_index];
 
     hal_f32 width = 140.0f;
-    hal_f32 item_h = (hal_f32)t->font_size + 10.0f;
+    hal_f32 item_h = hal__text_row_h(ui, t->font_size) + 10.0f;
     hal_f32 height = 4.0f + (hal_f32)menu->count * item_h;
 
     /* The popup hangs from the bar item; width fits the widest line
@@ -153,7 +153,7 @@ hal_rectf hal__menu_popup_rect(hal_ui *ui) {
 hal_rectf hal__menu_item_rect(hal_ui *ui, int item_index) {
     hal_rectf popup = hal__menu_popup_rect(ui);
     const hal_theme *t = ui->theme;
-    hal_f32 item_h = (hal_f32)t->font_size + 10.0f;
+    hal_f32 item_h = hal__text_row_h(ui, t->font_size) + 10.0f;
     return (hal_rectf){ popup.x, popup.y + 4.0f + (hal_f32)item_index * item_h,
                         popup.width, item_h };
 }

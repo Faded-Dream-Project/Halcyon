@@ -45,6 +45,10 @@ typedef struct hal_curves_state {
 
 typedef union hal_widget_state {
     struct {
+        hal_f32 scroll;         /* px, >= 0, when content overflows */
+        hal_f32 content_height; /* total stacked children height   */
+    } column;
+    struct {
         void (*on_click)(hal_widget *w, void *user);
         void *user_data;
     } button;
@@ -200,11 +204,39 @@ hal_rectf hal__menu_item_rect(hal_ui *ui, int item_index);
 /* uvview.c */
 void hal__uvview_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);
 
+/* Vertically centered text baseline: centers the font's
+ * ascent..descent band (REAL metrics — a face can be taller than
+ * its nominal px) inside [y, y + height], returning the baseline.
+ * Every text-drawing site must use this; hand-rolled formulas are
+ * how text ended up a full ascent too high (the 1920x1080 bug). */
+static inline hal_f32 hal__baseline(hal_f32 y, hal_f32 height,
+                                    const hal_font_metrics *m,
+                                    hal_f32 scale) {
+    /* Metrics are PHYSICAL px (font loaded at px * scale); the UI
+     * lays out in LOGICAL units — divide before any use. */
+    if (scale <= 0.0f)
+        scale = 1.0f;
+    hal_f32 asc = (hal_f32)m->ascent / scale;
+    hal_f32 desc = (hal_f32)m->descent / scale;
+    return y + (height - asc - desc) * 0.5f + asc;
+}
+
+/* A text row's minimum height from the REAL font metrics (>= the
+ * nominal px). Layouts size rows with this, never font_size
+ * alone. Implemented in ui.c. */
+hal_f32 hal__text_row_h(hal_ui *ui, hal_i32 px);
+
 /* curves.c */
 void hal__curves_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);
 
 /* paint.c: the hover tooltip overlay. */
 void hal__paint_tooltip(hal_ui *ui, hal_canvas *canvas);
+
+/* ui.c — STEP-2 audit: paints the base state, then every menubar
+ * menu opened in turn, auditing every draw_text ink rect against
+ * the clip stack and every popup against its widest item. Returns
+ * the violation count (each also printed to stderr). */
+int hal__ui_audit(hal_ui *ui, hal_canvas *canvas);
 
 /* tree.c */
 void hal__tree_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);

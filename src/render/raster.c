@@ -5,6 +5,7 @@
 
 #include "raster.h"
 
+
 #include <float.h>
 #include <math.h>
 #include <stdlib.h>
@@ -229,6 +230,51 @@ void hal_raster_line(hal_raster *r, hal_vec3f a, hal_vec3f b,
     hal_f32 ax = a.x - (hal_f32)r->x, ay = a.y - (hal_f32)r->y;
     hal_f32 bx = b.x - (hal_f32)r->x, by = b.y - (hal_f32)r->y;
 
+    /* Clip the segment to the raster rect BEFORE stepping: a line
+     * crossing the near plane projects to enormous pixel
+     * coordinates and an unbounded Bresenham would take millions of
+     * steps per line (the 1920x1080 smoke hung exactly there).
+     * Liang-Barsky on the pixel segment; z rides the parameter. */
+    {
+        hal_f32 t0 = 0.0f, t1 = 1.0f;
+        hal_f32 dx = bx - ax, dy = by - ay;
+        const hal_f32 xmin = -1.0f, xmax = (hal_f32)r->w + 1.0f;
+        const hal_f32 ymin = -1.0f, ymax = (hal_f32)r->h + 1.0f;
+        bool accept = true;
+        const hal_f32 pq[4][2] = {
+            { -dx, ax - xmin }, { dx, xmax - ax },
+            { -dy, ay - ymin }, { dy, ymax - ay },
+        };
+        for (int e = 0; e < 4; e++) {
+            hal_f32 p = pq[e][0], q = pq[e][1];
+            if (p == 0.0f) {
+                if (q < 0.0f) {
+                    accept = false;
+                    break;
+                }
+                continue;
+            }
+            hal_f32 t = q / p;
+            if (p < 0.0f) {
+                if (t > t1) { accept = false; break; }
+                if (t > t0) t0 = t;
+            } else {
+                if (t < t0) { accept = false; break; }
+                if (t < t1) t1 = t;
+            }
+        }
+        if (!accept || t1 < t0)
+            return;
+        hal_f32 z0 = a.z + (b.z - a.z) * t0;
+        hal_f32 z1 = a.z + (b.z - a.z) * t1;
+        ax += dx * t0;
+        ay += dy * t0;
+        bx = ax + dx * (t1 - t0);
+        by = ay + dy * (t1 - t0);
+        a = (hal_vec3f){ ax, ay, z0 };
+        b = (hal_vec3f){ bx, by, z1 };
+    }
+
     hal_u32 packed = color_pack(color);
     hal_i32 x0 = (hal_i32)floorf(ax), y0 = (hal_i32)floorf(ay);
     hal_i32 x1 = (hal_i32)floorf(bx), y1 = (hal_i32)floorf(by);
@@ -242,6 +288,7 @@ void hal_raster_line(hal_raster *r, hal_vec3f a, hal_vec3f b,
     hal_f32 dz = steps > 0 ? (b.z - a.z) / (hal_f32)steps : 0.0f;
 
     for (hal_i32 i = 0; i <= steps; i++) {
+
         px(r, x0, y0, z, packed);
         hal_i32 e2 = err * 2;
         if (e2 > -dy) {

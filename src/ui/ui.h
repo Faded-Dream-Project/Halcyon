@@ -156,6 +156,10 @@ hal_rectf hal_tree_row_rect(hal_widget *tree, const hal_tree_row *row);
 hal_widget *hal_uvview_create(hal_widget *parent);
 void hal_uvview_bind(hal_widget *uvview, const hal_mesh *mesh);
 
+/* Scrolls a COLUMN widget by dy pixels (clamped to its content).
+ * Returns true when the scroll changed. */
+bool hal_widget_scroll_by(hal_widget *column, hal_f32 dy);
+
 /* A hover tooltip (shown after the pointer rests on the widget). */
 void hal_widget_set_tooltip(hal_widget *w, const char *text);
 
