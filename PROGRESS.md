@@ -718,7 +718,7 @@ case; noted below).
   deterministic fuzz suite over all three loaders (found and fixed
   nine leaked parser keys), hostile-count and deep-chain and
   large-scene stress; the hint bar, quick-start overlay and
-  tooltips. The v0.2 plan is complete. 2383 headless checks total.
+  tooltips. The v0.2 plan is complete. 2771 headless checks total.
 - **2026-11-18 — session 4, item 4: modeling quality.** Region
   extrude, angle-based unwrap, the knife, proportional grab, and
   snapping (edge slide deferred). Two knife bugs and one packer
