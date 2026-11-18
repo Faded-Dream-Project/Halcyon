@@ -6,6 +6,15 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — curve editor + weight painting (2026-11-18, session 3)
+
+- Curve editor panel: per-channel value-over-time graphs with the
+  clips' easing baked in, key dots, a synced playhead (read-only —
+  scrubbing and keying stay in the timeline).
+- Weight painting: a Paint tool-rail mode; ray-hit brush with
+  smoothstep falloff, per-vertex renormalization, Shift subtracts,
+  one undo per stroke; the active bone follows pose-mode selection.
+
 ### Added — M9 game-asset workflow (2026-11-18, session 3)
 
 - Asset presets on the Add menu: Crate, Barrel, Sword, Table.

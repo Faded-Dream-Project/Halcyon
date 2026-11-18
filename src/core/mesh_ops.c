@@ -1139,3 +1139,77 @@ fail:
     free(centroids);
     return false;
 }
+
+bool hal_mesh_paint_weight(hal_mesh *m, hal_mat4f world,
+                           hal_vec3f point, hal_f32 radius,
+                           int bone, hal_f32 strength) {
+    if (!m || !m->skin_weights || !m->skin_bones || radius <= 1e-5f ||
+        bone < 0)
+        return false;
+
+    /* The brush point in mesh-local space. */
+    hal_mat4f inv = hal_mat4f_invert(world);
+    hal_vec3f local = hal_mat4f_transform_point(inv, point);
+    /* Radius scaled by the world matrix's largest axis scale. */
+    hal_vec3f axis_s = {
+        hal_vec3f_length(hal_mat4f_transform_dir(world,
+                                                 hal_vec3f_axis_x())),
+        hal_vec3f_length(hal_mat4f_transform_dir(world,
+                                                 hal_vec3f_axis_y())),
+        hal_vec3f_length(hal_mat4f_transform_dir(world,
+                                                 hal_vec3f_axis_z())),
+    };
+    hal_f32 scale = fmaxf(axis_s.x, fmaxf(axis_s.y, axis_s.z));
+    if (scale < 1e-5f)
+        scale = 1.0f;
+    hal_f32 local_r = radius / scale;
+
+    bool changed = false;
+    for (size_t v = 0; v < m->vert_count; v++) {
+        hal_f32 d = hal_vec3f_distance(m->verts[v], local);
+        if (d >= local_r)
+            continue;
+        hal_f32 t = 1.0f - d / local_r;
+        t = t * t * (3.0f - 2.0f * t); /* smoothstep falloff */
+
+        /* Find the bone's slot (or a free one). */
+        int slot = -1;
+        int free_slot = -1;
+        for (int i = 0; i < 4; i++) {
+            size_t wi = v * 4 + (size_t)i;
+            if (m->skin_bones[wi] == bone)
+                slot = i;
+            if (m->skin_bones[wi] < 0 && free_slot < 0)
+                free_slot = i;
+        }
+        if (slot < 0 && free_slot < 0)
+            continue; /* 4 influences used, none ours */
+        if (slot < 0) {
+            slot = free_slot;
+            m->skin_bones[v * 4 + (size_t)slot] = bone;
+            m->skin_weights[v * 4 + (size_t)slot] = 0.0f;
+        }
+
+        hal_f32 w =
+            m->skin_weights[v * 4 + (size_t)slot] + strength * t;
+        if (w < 0.0f)
+            w = 0.0f;
+        if (w > 1.0f)
+            w = 1.0f;
+        if (w != m->skin_weights[v * 4 + (size_t)slot]) {
+            m->skin_weights[v * 4 + (size_t)slot] = w;
+            changed = true;
+        }
+
+        /* Renormalize the surviving influences. */
+        hal_f32 sum = 0.0f;
+        for (int i = 0; i < 4; i++)
+            if (m->skin_bones[v * 4 + (size_t)i] >= 0)
+                sum += m->skin_weights[v * 4 + (size_t)i];
+        if (sum > 1e-6f)
+            for (int i = 0; i < 4; i++)
+                m->skin_weights[v * 4 + (size_t)i] /= sum;
+    }
+    hal_mesh_invalidate_derived(m);
+    return changed;
+}

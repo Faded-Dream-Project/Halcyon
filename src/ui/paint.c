@@ -311,6 +311,9 @@ void hal__paint_widget(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
     case HAL_WIDGET_UVVIEW:
         hal__uvview_paint(ui, w, canvas);
         break;
+    case HAL_WIDGET_CURVES:
+        hal__curves_paint(ui, w, canvas);
+        break;
     }
 
     for (hal_widget *c = w->first_child; c; c = c->next)

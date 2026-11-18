@@ -470,6 +470,26 @@ case; noted below).
   (wrong helper — heap overflow, then no reduction) and the huge-cell
   test straddled a lattice boundary.
 
+### Implemented and tested — curve editor + weight painting (session 3)
+
+- Curve editor widget (src/ui/curves.c): bound to the active clip;
+  per-channel value-over-time graphs (vec: x/y/z lines; rotation:
+  x/y/z/w), each channel normalized to its own value bounds, key
+  dots, a synced playhead, and the clips' own easing baked into the
+  sampled polylines. READ-ONLY (honest scope: key insertion and
+  scrubbing live in the timeline; per-key easing is edited in data).
+- Weight painting: hal_mesh_paint_weight (core, testable) — brush at
+  a world point with smoothstep falloff, world-to-local through the
+  object matrix, per-vert renormalization, free influence-slot
+  acquisition, add/subtract by sign. Shell: Paint tool-rail toggle,
+  left-drag strokes (Shift subtracts), the brush rides the mouse
+  ray's mesh hit (or the closest approach to the object center on
+  misses), one snapshot-undo command per stroke, the active bone
+  tracks the pose-mode bone selection.
+- Tests: weight paint (falloff reach, sums stay 1, subtract reduces,
+  far touch is a no-op) in test_rig; curves widget pixel-content
+  paint check in test_anim.
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -523,6 +543,10 @@ case; noted below).
 
 ## Log
 
+- **2026-11-18 — session 3, item 4: curve editor + weight painting.**
+  Eased channel graphs widget (read-only) and the weight-paint brush
+  (falloff, renormalization, stroke undo, Shift subtract). 2145
+  headless checks total.
 - **2026-11-18 — session 3, item 3: M9 complete.** Asset presets,
   vertex-clustering LODs, box-collider glTF export, and Z-up /
   centimeter export options (baked into roots, animation-consistent).

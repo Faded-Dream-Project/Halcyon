@@ -6,6 +6,8 @@
 #include "core/anim.h"
 #include "core/project.h"
 #include "io/io.h"
+#include "platform/platform.h"
+#include "ui/ui.h"
 #include "core/scene.h"
 
 #include <math.h>
@@ -251,10 +253,62 @@ static void test_gltf_animation_export(void) {
     hal_scene_destroy(s);
 }
 
+/* The curve editor widget paints the bound clip's curves (grid,
+ * polylines, key dots, playhead) — verified by pixel content, not
+ * screenshots. */
+static void test_curves_widget(void) {
+    hal_ui *ui = hal_ui_create();
+    hal_widget *root = hal_ui_root(ui);
+    hal_widget_set_rect(root, (hal_rectf){ 0, 0, 300, 300 });
+    hal_widget *cw = hal_curves_create(root);
+    hal_widget_set_rect(cw, (hal_rectf){ 10, 10, 200, 150 });
+
+    /* A clip with an eased location-X channel. */
+    hal_scene *s = hal_scene_create("C");
+    hal_object_id id = hal_scene_object_add(s, "B", HAL_OBJECT_MESH);
+    int ci = hal_scene_clip_add(s, "Graph");
+    hal_clip *clip = hal_scene_clip(s, ci);
+    clip->end = 1.0f;
+    hal_clip_key_vec(clip, HAL_CH_LOC_X, id, -1, 0.0f,
+                     (hal_vec3f){ 0, 0, 0 }, HAL_INTERP_SMOOTH);
+    hal_clip_key_vec(clip, HAL_CH_LOC_X, id, -1, 1.0f,
+                     (hal_vec3f){ 1, 0, 0 }, HAL_INTERP_SMOOTH);
+    hal_curves_bind(cw, clip);
+    hal_curves_set_playhead(cw, 0.5f);
+    hal_ui_layout(ui);
+
+    hal_surface *surf = NULL;
+    HAL_TEST_CHECK_EQ_I(hal_surface_offscreen_create(300, 300, &surf),
+                        HAL_OK);
+    hal_canvas canvas;
+    HAL_TEST_CHECK(hal_canvas_init(&canvas, surf, 1.0f));
+    hal_color bg = hal_color_hex(0x141a3cu);
+    hal_canvas_fill_rect(&canvas, (hal_rectf){ 0, 0, 300, 300 }, bg);
+    hal_ui_paint(ui, &canvas);
+
+    int drawn = 0;
+    for (int y = 12; y < 158; y += 2)
+        for (int x = 12; x < 208; x += 2) {
+            hal_u32 p = canvas.pixels[(size_t)y * (size_t)canvas.stride +
+                                      (size_t)x];
+            if ((p & 0xFFu) != (hal_u32)(bg.b * 255.0f))
+                drawn++;
+        }
+    HAL_TEST_CHECK(drawn > 40);
+
+    /* Unbound: still paints (the empty note). */
+    hal_curves_bind(cw, NULL);
+    hal_ui_paint(ui, &canvas);
+    hal_surface_destroy(surf);
+    hal_scene_destroy(s);
+    hal_ui_destroy(ui);
+}
+
 int main(void) {
     test_keys_and_sampling();
     test_rotation_and_loop();
     test_bone_channel_and_project_round_trip();
     test_gltf_animation_export();
+    test_curves_widget();
     HAL_TEST_SUMMARY("test_anim");
 }

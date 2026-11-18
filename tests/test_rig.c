@@ -4,10 +4,12 @@
 
 #include "hal_test.h"
 #include "core/armature.h"
+#include "core/mesh_ops.h"
 #include "core/mesh.h"
 #include "core/project.h"
 #include "core/scene.h"
 #include "io/io.h"
+#include "ui/ui.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -391,6 +393,59 @@ static void test_gltf_skin_round_trip(void) {
     hal_scene_destroy(s);
 }
 
+/* Weight painting: add/subtract with falloff, renormalization, and
+ * free-slot acquisition. */
+static void test_weight_paint(void) {
+    hal_armature *arm = chain2();
+    hal_mesh *m = hal_mesh_plane(1.0f);
+    hal_mesh_bind_armature(m, arm);
+    hal_mat4f world = hal_mat4f_identity();
+
+    /* Paint bone 1 strongly at the plane's +X edge: verts near
+     * (1,0,0) gain bone-1 weight, all sums stay 1. */
+    HAL_TEST_CHECK(hal_mesh_paint_weight(
+        m, world, hal_vec3f_make(1.0f, 0.0f, 0.0f), 1.2f, 1, 0.9f));
+    bool any_bone1 = false;
+    for (size_t v = 0; v < m->vert_count; v++) {
+        hal_f32 sum = 0.0f;
+        for (int i = 0; i < 4; i++) {
+            size_t wi = v * 4 + (size_t)i;
+            if (m->skin_bones[wi] < 0)
+                continue;
+            sum += m->skin_weights[wi];
+            if (m->skin_bones[wi] == 1 && m->skin_weights[wi] > 0.1f)
+                any_bone1 = true;
+        }
+        HAL_TEST_CHECK_EQ_F(sum, 1.0f, 1e-4);
+    }
+    HAL_TEST_CHECK(any_bone1);
+
+    /* Subtract the same region: bone 1's weight falls back. */
+    hal_f32 before = 0.0f, after = 0.0f;
+    for (size_t v = 0; v < m->vert_count; v++)
+        for (int i = 0; i < 4; i++) {
+            size_t wi = v * 4 + (size_t)i;
+            if (m->skin_bones[wi] == 1)
+                before += m->skin_weights[wi];
+        }
+    HAL_TEST_CHECK(hal_mesh_paint_weight(
+        m, world, hal_vec3f_make(1.0f, 0.0f, 0.0f), 1.2f, 1, -0.9f));
+    for (size_t v = 0; v < m->vert_count; v++)
+        for (int i = 0; i < 4; i++) {
+            size_t wi = v * 4 + (size_t)i;
+            if (m->skin_bones[wi] == 1)
+                after += m->skin_weights[wi];
+        }
+    HAL_TEST_CHECK(after < before);
+
+    /* A far point changes nothing. */
+    HAL_TEST_CHECK(!hal_mesh_paint_weight(
+        m, world, hal_vec3f_make(50.0f, 0.0f, 0.0f), 0.5f, 1, 0.9f));
+
+    hal_mesh_destroy(m);
+    hal_armature_destroy(arm);
+}
+
 int main(void) {
     test_pose_chain();
     test_auto_weights();
@@ -398,5 +453,6 @@ int main(void) {
     test_ik();
     test_project_armature_round_trip();
     test_gltf_skin_round_trip();
+    test_weight_paint();
     HAL_TEST_SUMMARY("test_rig");
 }

@@ -87,6 +87,7 @@ typedef enum hal_widget_kind {
     HAL_WIDGET_TREE,     /* tree view (outliner)                */
     HAL_WIDGET_MENUBAR,  /* the menu bar                        */
     HAL_WIDGET_UVVIEW,   /* bound UV layout viewer              */
+    HAL_WIDGET_CURVES,   /* bound animation curve graph         */
 } hal_widget_kind;
 
 /* ---- Constructors (each appends to `parent`) ---- */
@@ -154,6 +155,15 @@ hal_rectf hal_tree_row_rect(hal_widget *tree, const hal_tree_row *row);
  * alive); NULL clears. */
 hal_widget *hal_uvview_create(hal_widget *parent);
 void hal_uvview_bind(hal_widget *uvview, const hal_mesh *mesh);
+
+/* Curve editor: draws the bound clip's channels as value-over-time
+ * graphs (vec channels: x/y/z lines; rotation: x/y/z/w), key dots,
+ * and a playhead at `play_time`. READ-ONLY visualization — scrubbing
+ * and key insertion live in the timeline (honest scope; per-key
+ * easing is edited in data). The clip is BORROWED; NULL clears. */
+hal_widget *hal_curves_create(hal_widget *parent);
+void hal_curves_bind(hal_widget *curves, const void *clip);
+void hal_curves_set_playhead(hal_widget *curves, hal_f32 time);
 
 /* Menu bar: menus with items. Items act through on_activate. */
 hal_widget *hal_menubar_create(hal_widget *parent);

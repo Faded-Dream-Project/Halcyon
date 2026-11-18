@@ -101,6 +101,16 @@ void hal_mesh_rebuild_edges(hal_mesh *m);
 /* Recomputes the normal caches (they are lazy; this forces). */
 void hal_mesh_recalc_normals(hal_mesh *m);
 
+/* ---- Weight painting ----
+ * Adjusts `bone`'s weight on every vert within `radius` (world
+ * units) of `point` (world space, transformed back through `world`);
+ * smoothstep falloff, weights renormalized per vert. strength > 0
+ * adds, < 0 subtracts. Returns true when anything changed. Requires
+ * bound weights (skin_bones/skin_weights). */
+bool hal_mesh_paint_weight(hal_mesh *m, hal_mat4f world,
+                           hal_vec3f point, hal_f32 radius,
+                           int bone, hal_f32 strength);
+
 /* ---- LOD generation ----
  * Vertex-clustering decimation: verts snap to a lattice of `cell`
  * (scene units), welded verts merge, loops remap, and faces that

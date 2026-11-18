@@ -63,6 +63,7 @@ struct hal_app {
     hal_widget *mat_entry[3];
     hal_widget *metallic_slider, *rough_slider;
     hal_widget *uvview;
+    hal_widget *curves;
 
     /* The 3D viewport. */
     hal_camera camera;
@@ -96,6 +97,15 @@ struct hal_app {
     /* glTF export options (File menu toggles). */
     bool export_z_up;
     bool export_cm;
+
+    /* Weight paint mode: drag over a bound mesh to adjust the
+     * active bone's weights (Shift subtracts). */
+    bool paint_mode;
+    bool painting;
+    bool paint_subtract;
+    int paint_bone;
+    hal_mesh *paint_snapshot; /* stroke undo base (owned)  */
+    hal_object_id paint_obj;
 
     /* Animation: the active clip, the playhead, playback. */
     int active_clip;        /* -1 none                            */
@@ -1768,6 +1778,7 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
      * it as real operators land. */
     hal_widget *rail = hal_column_create(hal_ui_root(app->ui));
     hal_toggle_create(rail, "Wire", &app->wireframe);
+    hal_toggle_create(rail, "Paint", &app->paint_mode);
 
     /* Right sidebar: outliner over properties; the outliner takes the
      * leftover height (expand), properties hugs its content. */
@@ -1815,6 +1826,9 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
 
     hal_widget *uv_panel = hal_panel_create(sidebar, "UV Editor");
     app->uvview = hal_uvview_create(uv_panel);
+
+    hal_widget *curve_panel = hal_panel_create(sidebar, "Curves");
+    app->curves = hal_curves_create(curve_panel);
 
     /* Status bar. */
     app->status = hal_label_create(hal_ui_root(app->ui), "Welcome");
@@ -1943,6 +1957,88 @@ static void edit_click(hal_app *app, hal_mat4f vpm, hal_rectf vp,
                : app->sel_mode == 1 ? "edge"
                                     : "face",
                hit);
+}
+
+/* ---- Weight painting ----
+ * The stroke: begin snapshots the mesh (undo base), stroke applies
+ * the brush under the cursor, end pushes one undo command for the
+ * whole stroke. The active bone is the one selected in pose mode
+ * (kept in paint_bone), defaulting to 0. */
+static void paint_stroke(hal_app *app, hal_mat4f vpm, hal_rectf vp,
+                         hal_f32 px, hal_f32 py);
+static void paint_begin(hal_app *app, hal_mat4f vpm, hal_rectf vp,
+                        hal_f32 px, hal_f32 py, bool subtract) {
+    hal_object *obj =
+        hal_scene_object(app->scene, hal_scene_selected(app->scene));
+    if (!obj || !obj->mesh || !obj->mesh->skin_weights ||
+        obj->skin_armature == HAL_OBJECT_ID_NONE) {
+        set_status(app, "Paint: select a mesh bound to an armature");
+        return;
+    }
+    app->paint_obj = hal_scene_selected(app->scene);
+    app->paint_snapshot = hal_mesh_clone(obj->mesh);
+    app->painting = app->paint_snapshot != NULL;
+    app->paint_subtract = subtract;
+    if (app->painting)
+        paint_stroke(app, vpm, vp, px, py);
+}
+
+static void paint_stroke(hal_app *app, hal_mat4f vpm, hal_rectf vp,
+                         hal_f32 px, hal_f32 py) {
+    hal_object *obj = hal_scene_object(app->scene, app->paint_obj);
+    if (!obj || !obj->mesh)
+        return;
+    /* The brush point: the mouse ray hit on the mesh (nearest face),
+     * or a point on a sphere around the target at the ray's closest
+     * approach (misses still glide over the surface region). */
+    hal_ray ray = hal_camera_ray(&app->camera, vpm, vp, px, py);
+    hal_mat4f world = hal_object_world_matrix(app->scene, obj);
+    hal_f32 t = 0.0f;
+    int face = hal_pick_face(obj->mesh, world, ray, &t);
+    hal_vec3f point;
+    if (face >= 0) {
+        point = hal_vec3f_add(ray.origin,
+                              hal_vec3f_mul(ray.dir, t));
+    } else {
+        /* Closest point of the ray to the object's world center. */
+        hal_vec3f c = hal_mat4f_transform_point(
+            world, hal_vec3f_zero());
+        hal_vec3f to_c = hal_vec3f_sub(c, ray.origin);
+        hal_f32 d = hal_vec3f_dot(to_c, ray.dir);
+        d = d > 0.0f ? d : 0.0f;
+        point = hal_vec3f_add(ray.origin,
+                              hal_vec3f_mul(ray.dir, d));
+    }
+    hal_f32 strength =
+        (app->paint_subtract ? -0.25f : 0.25f);
+    if (hal_mesh_paint_weight(obj->mesh, world, point, 0.4f,
+                              app->paint_bone, strength)) {
+        app->dirty = true;
+        hal_autosave_mark_dirty(app->autosave);
+    }
+}
+
+static void paint_end(hal_app *app) {
+    app->painting = false;
+    hal_object *obj = hal_scene_object(app->scene, app->paint_obj);
+    if (!obj || !app->paint_snapshot) {
+        hal_mesh_destroy(app->paint_snapshot);
+        app->paint_snapshot = NULL;
+        return;
+    }
+    mesh_cmd *cmd = malloc(sizeof(*cmd));
+    if (cmd) {
+        cmd->id = app->paint_obj;
+        /* The snapshot is the PRE-stroke mesh; the object holds the
+         * post-stroke mesh — the swap-command contract. */
+        cmd->snapshot = app->paint_snapshot;
+        app->paint_snapshot = NULL;
+        hal_undo_stack_push(app->undo, "Weight Paint", mesh_cmd_apply,
+                            mesh_cmd_revert, mesh_cmd_free, cmd);
+    } else {
+        hal_mesh_destroy(app->paint_snapshot);
+        app->paint_snapshot = NULL;
+    }
 }
 
 /* Picks a bone of the posed armature by screen-space distance to the
@@ -2180,6 +2276,17 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
         }
     }
 
+    /* --- Weight painting stroke --- */
+    if (app->painting && event->type == HAL_EVENT_POINTER_MOTION) {
+        paint_stroke(app, vpm, vp, px, py);
+        return true;
+    }
+    if (app->painting &&
+        event->type == HAL_EVENT_POINTER_BUTTON_UP) {
+        paint_end(app);
+        return true;
+    }
+
     /* --- Timeline scrubbing (before camera handling) --- */
     {
         hal_rectf tr = app->timeline_rect;
@@ -2241,6 +2348,12 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
                     return true;
                 }
             }
+            if (app->paint_mode &&
+                event->pointer_button.button == HAL_BUTTON_LEFT) {
+                paint_begin(app, vpm, vp, px, py,
+                            (mods & HAL_MOD_SHIFT) != 0);
+                return true;
+            }
             if (app->pose_mode) {
                 hal_object *arm_obj =
                     hal_scene_object(app->scene, app->pose_obj);
@@ -2249,10 +2362,17 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
                     for (size_t b = 0; b < arm_obj->armature->count; b++)
                         arm_obj->armature->bones[b].selected =
                             (int)b == bone;
-                    if (bone >= 0)
+                    if (bone >= 0) {
+                        app->paint_bone = bone;
                         set_status(app, "Bone: %s",
                                    arm_obj->armature->bones[bone].name);
+                    }
                 }
+                return true;
+            }
+            if (app->paint_mode) {
+                paint_begin(app, vpm, vp, px, py,
+                            (mods & HAL_MOD_SHIFT) != 0);
                 return true;
             }
             if (app->edit_mode) {
@@ -2677,6 +2797,10 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
 
     /* The timeline strip (when a clip is active). */
     paint_timeline(app, &canvas);
+    hal_curves_bind(
+        app->curves,
+        hal_scene_clip(app->scene, app->active_clip));
+    hal_curves_set_playhead(app->curves, app->play_time);
 
     /* Overlays: edit-mode selection and the move gizmo. */
     {

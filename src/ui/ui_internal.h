@@ -55,6 +55,10 @@ typedef union hal_widget_state {
         const hal_mesh *mesh; /* borrowed */
     } uvview;
     struct {
+        const void *clip; /* borrowed hal_clip (ui cannot see core/anim) */
+        hal_f32 play_time;
+    } curves;
+    struct {
         int active;
     } tabs;
     struct {
@@ -177,6 +181,9 @@ hal_rectf hal__menu_item_rect(hal_ui *ui, int item_index);
 
 /* uvview.c */
 void hal__uvview_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);
+
+/* curves.c */
+void hal__curves_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);
 
 /* tree.c */
 void hal__tree_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);
