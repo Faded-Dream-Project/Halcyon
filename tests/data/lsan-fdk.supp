@@ -1,0 +1,18 @@
+# Halcyon LeakSanitizer suppressions — third-party modules only.
+#
+# Halcyon's own allocations must never appear here: a leak in Halcyon
+# code is a bug to fix, not to suppress. This list covers allocations
+# made inside the FDK runtime's dlopen'd system libraries that never
+# free their process-lifetime caches (the same posture as FDK's own
+# tests/data/lsan-gl.supp).
+
+# fontconfig's per-config caches (FDK's font discovery dlopens it).
+leak:libfontconfig
+
+# Mesa/GL driver state (FDK's GPU present lane, when it engages).
+leak:libGLX_mesa
+leak:libGLdispatch
+leak:libEGL_mesa
+
+# Xlib's display/connection caches.
+leak:libX11

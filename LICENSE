@@ -1,0 +1,23 @@
+LICENSE (placeholder)
+=====================
+
+Halcyon — a calm, from-scratch 3D modeling and animation suite.
+Part of the Faded Dream Project. https://github.com/Faded-Dream-Project
+
+The final license has not been chosen yet. The project's stated intent:
+
+  - Halcyon's own code will be released under a permissive license
+    (MIT, BSD, zlib or public domain class).
+  - No copyleft license will be accepted anywhere in Halcyon's
+    dependency graph. Every third-party component requires a
+    permissive license, a written justification in
+    docs/dependencies.md, and an entry in THIRD-PARTY-NOTICES.md.
+
+Until the decision is recorded here, all rights are reserved by the
+Faded Dream Project; do not redistribute.
+
+FDK note: Halcyon links against the separately-installed Faded Dream
+ToolKit (FDK), which is proprietary software under its own license
+(https://github.com/Faded-Dream-Project/FDK). FDK's license governs FDK
+itself, not applications built with it; Halcyon neither bundles nor
+redistributes the FDK runtime or source.

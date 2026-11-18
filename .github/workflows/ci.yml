@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Halcyon
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxext-dev libxrender-dev libxrandr-dev \
+            libxkbcommon-dev xvfb
+
+      - name: Build and install FDK 1.0.0
+        run: |
+          git clone --depth 1 --branch v1.0.0 \
+            https://github.com/Faded-Dream-Project/FDK.git ../FDK
+          make -C ../FDK release all
+          sudo make -C ../FDK FDK_CONFIG=release install
+
+      - name: Build Halcyon (debug, sanitizers)
+        run: make
+
+      - name: Headless tests
+        run: make test
+
+      - name: Display-tier tests (Xvfb)
+        run: make test-display
