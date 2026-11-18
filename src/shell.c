@@ -13,6 +13,7 @@
 #include "io/io.h"
 #include "core/project.h"
 #include "render/pick.h"
+#include "render/preview.h"
 #include "render/raster.h"
 
 #include <math.h>
@@ -84,6 +85,9 @@ struct hal_app {
     hal_object_id pose_obj;
     int bone_modal;         /* bone index during modal rotation */
     hal_quatf bone_modal_orig;
+
+    /* Preview rendering: which Render menu item opened the dialog. */
+    int render_kind;
 
     /* Animation: the active clip, the playhead, playback. */
     int active_clip;        /* -1 none                            */
@@ -489,6 +493,100 @@ static bool op_recalc(hal_mesh *m, void *user) {
     return true;
 }
 
+/* Batch export: one glTF per mesh object, prefix_NNN.glb. */
+static void batch_done(char *path, void *user) {
+    hal_app *app = user;
+    if (!path) {
+        set_status(app, "Batch export cancelled");
+        return;
+    }
+    /* Strip the file name to its directory + base prefix. */
+    char base[512];
+    snprintf(base, sizeof(base), "%s", path);
+    char *slash = strrchr(base, '/');
+    const char *file = slash ? slash + 1 : base;
+    char dir[512];
+    if (slash) {
+        snprintf(dir, sizeof(dir), "%.*s", (int)(slash - base), base);
+    } else {
+        strcpy(dir, ".");
+    }
+    /* Cut the extension off the file name. */
+    const char *dot = NULL;
+    for (const char *p = file; *p; p++)
+        if (*p == '.')
+            dot = p;
+    size_t name_len = dot ? (size_t)(dot - file) : strlen(file);
+    char prefix[256];
+    snprintf(prefix, sizeof(prefix), "%.*s", (int)name_len, file);
+
+    char err[256] = { 0 };
+    char out[900];
+    size_t exported = 0;
+    for (size_t i = 0; i < app->scene->count; i++) {
+        hal_object *obj = &app->scene->objects[i];
+        if (!obj->mesh)
+            continue;
+        /* Build a one-object scene sharing the mesh pointer. */
+        hal_scene *one = hal_scene_create(obj->name);
+        hal_object_id id =
+            hal_scene_object_add(one, obj->name, HAL_OBJECT_MESH);
+        hal_object_set_location(one, id, obj->location);
+        hal_object_set_rotation(one, id, obj->rotation);
+        hal_object_set_scale(one, id, obj->scale);
+        /* Clone so the temp scene owns its copy. */
+        hal_object_set_mesh(one, id, hal_mesh_clone(obj->mesh));
+        snprintf(out, sizeof(out), "%s/%s_%03zu.glb", dir, prefix,
+                 exported + 1);
+        if (hal_io_gltf_export(one, out, err, sizeof(err)) == HAL_OK)
+            exported++;
+        hal_scene_destroy(one);
+    }
+    set_status(app, "Batch exported %zu objects", exported);
+    free(path);
+}
+
+/* ---- Preview renders ---- */
+
+static void render_done(char *path, void *user) {
+    hal_app *app = user;
+    if (!path) {
+        set_status(app, "Render cancelled");
+        return;
+    }
+    char err[256] = { 0 };
+    hal_result r = HAL_ERR_IO;
+    /* The menu item that opened the dialog (0 preview, 1 turntable,
+     * 2 thumbnail). */
+    switch (app->render_kind) {
+    case 0: {
+        hal_camera cam = hal_camera_frame_scene(app->scene,
+                                                app->camera, 1.15f);
+        r = hal_preview_render(app->scene, cam, 1280, 720, true, path,
+                               err, sizeof(err));
+        break;
+    }
+    case 1: {
+        /* Strip ".png" from the chosen file to get the prefix. */
+        size_t n = strlen(path);
+        if (n > 4 && strcmp(path + n - 4, ".png") == 0)
+            path[n - 4] = '\0';
+        hal_camera cam = hal_camera_frame_scene(app->scene,
+                                                app->camera, 1.15f);
+        r = hal_preview_turntable(app->scene, cam, 640, 480, 24, path,
+                                  err, sizeof(err));
+        break;
+    }
+    default:
+        r = hal_preview_thumbnail(app->scene, 256, path, err,
+                                  sizeof(err));
+        break;
+    }
+    set_status(app, r == HAL_OK ? "Rendered %s" : "Render failed: %s",
+               r == HAL_OK ? path : (err[0] ? err : "I/O error"));
+    free(path);
+}
+
 /* ---- Export / import ---- */
 
 typedef struct export_req {
@@ -599,6 +697,8 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, file, "Export STL...", NULL, menu_action, app);
     hal_menu_item_add(bar, file, "Import glTF/OBJ...", NULL,
                       menu_action, app);
+    hal_menu_item_add(bar, file, "Batch Export glTF (per object)...",
+                      NULL, menu_action, app);
     hal_menu_item_add(bar, file, NULL, NULL, NULL, NULL);
     hal_menu_item_add(bar, file, "Quit", "Ctrl+Q", menu_action, app);
 
@@ -629,6 +729,11 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, edit, "Unwrap Smart (lite)", NULL, menu_action, app);
     hal_menu_item_add(bar, edit, "New Material", NULL, menu_action, app);
     hal_menu_item_add(bar, edit, NULL, NULL, NULL, NULL);
+    hal_menu_item_add(bar, edit, "Origin to BBox Center", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, edit, "Origin to World Origin", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, edit, NULL, NULL, NULL, NULL);
     hal_menu_item_add(bar, edit, "Select All", "A", menu_action, app);
     hal_menu_item_add(bar, edit, "Deselect All", "Alt+A", menu_action, app);
     hal_menu_item_add(bar, edit, NULL, NULL, NULL, NULL);
@@ -637,6 +742,14 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, edit, "Add Bone (child)", NULL,
                       menu_action, app);
     hal_menu_item_add(bar, edit, "Solve IK (tip to mouse)", NULL,
+                      menu_action, app);
+
+    int render_menu = hal_menu_add(bar, "Render");
+    hal_menu_item_add(bar, render_menu, "Preview PNG...", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, render_menu, "Turntable Frames...", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, render_menu, "Thumbnail...", NULL,
                       menu_action, app);
 
     int anim_menu = hal_menu_add(bar, "Animation");
@@ -829,7 +942,13 @@ static void menu_action(hal_widget *menubar, int menu, int item,
                     import_done, app, app->window)))
                 set_status(app, "Choose a file to import...");
             break;
-        case 10:
+        case 9:
+            if (hal_ok(hal_dialog_save_file(
+                    app->platform, "Batch export prefix", "*.glb",
+                    "object.glb", batch_done, app, app->window)))
+                set_status(app, "Choose the batch output location...");
+            break;
+        case 11:
             hal_app_quit(app);
             break;
         default:
@@ -1106,10 +1225,63 @@ static void menu_action(hal_widget *menubar, int menu, int item,
             app->dirty = true;
             break;
         }
+        case 31: {
+            /* Origin to bbox center: shift verts, compensate the
+             * location so the world geometry stays put. */
+            hal_object_id sel = hal_scene_selected(app->scene);
+            hal_object *obj = hal_scene_object(app->scene, sel);
+            if (obj && obj->mesh) {
+                hal_mesh *snap = hal_mesh_clone(obj->mesh);
+                hal_vec3f off = hal_mesh_origin_to_center(obj->mesh);
+                hal_object_set_location(app->scene, sel,
+                                        hal_vec3f_add(obj->location, off));
+                mesh_cmd *cmd = malloc(sizeof(*cmd));
+                if (cmd && snap) {
+                    cmd->id = sel;
+                    cmd->snapshot = snap;
+                    hal_undo_stack_push(app->undo, "Origin to Center",
+                                        mesh_cmd_apply, mesh_cmd_revert,
+                                        mesh_cmd_free, cmd);
+                }
+                set_status(app, "Origin moved to bbox center");
+                app->dirty = true;
+            }
+            break;
+        }
+        case 32: {
+            hal_object_id sel = hal_scene_selected(app->scene);
+            hal_object *obj = hal_scene_object(app->scene, sel);
+            if (obj) {
+                hal_object_set_location(app->scene, sel,
+                                        hal_vec3f_zero());
+                set_status(app, "Origin at the world origin");
+                app->dirty = true;
+            }
+            break;
+        }
         default:
             break;
         }
-    } else if (menu == 2) { /* Animation */
+    } else if (menu == 2) { /* Render */
+        switch (item) {
+        case 0: /* Preview PNG */
+        case 1: /* Turntable */
+        case 2: { /* Thumbnail */
+            app->render_kind = item;
+            if (hal_ok(hal_dialog_save_file(
+                    app->platform,
+                    item == 0   ? "Render preview"
+                    : item == 1 ? "Turntable prefix"
+                                : "Thumbnail",
+                    "*.png", "render.png", render_done, app,
+                    app->window)))
+                set_status(app, "Choose the output location...");
+            break;
+        }
+        default:
+            break;
+        }
+    } else if (menu == 3) { /* Animation */
         switch (item) {
         case 0: {
             char name[64];
@@ -1176,7 +1348,7 @@ static void menu_action(hal_widget *menubar, int menu, int item,
         default:
             break;
         }
-    } else if (menu == 3) { /* Add */
+    } else if (menu == 4) { /* Add */
         if (item <= 5) {
             add_object(app, ADD_NAMES[item],
                        HAL_OBJECT_MESH, hal_vec3f_zero());

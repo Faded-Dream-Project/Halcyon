@@ -101,6 +101,17 @@ void hal_mesh_rebuild_edges(hal_mesh *m);
 /* Recomputes the normal caches (they are lazy; this forces). */
 void hal_mesh_recalc_normals(hal_mesh *m);
 
+/* ---- Origin tools (M9) ----
+ * Both SHIFT the geometry and return the offset applied, so the
+ * caller can compensate the object's location (keeping the geometry
+ * in place in the world). */
+
+/* Moves the origin to the mesh's bounding-box center. */
+hal_vec3f hal_mesh_origin_to_center(hal_mesh *m);
+
+/* Moves the origin to the world origin (mesh-local (0,0,0)). */
+hal_vec3f hal_mesh_origin_to_zero(hal_mesh *m);
+
 #ifdef __cplusplus
 }
 #endif

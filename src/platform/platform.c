@@ -429,6 +429,25 @@ void hal_surface_destroy(hal_surface *surface) {
     free(surface);
 }
 
+hal_result hal_surface_from_image(const char *path,
+                                  hal_surface **out_surface) {
+    if (!path || !out_surface)
+        return HAL_ERR_INVALID_ARGUMENT;
+    fdk_surface *fdk_surf = NULL;
+    fdk_result r = fdk_surface_create_from_image(path, &fdk_surf);
+    if (!fdk_ok(r))
+        return hal_result_from_fdk(r);
+    hal_surface *surf = calloc(1, sizeof(*surf));
+    if (!surf) {
+        fdk_surface_destroy(fdk_surf);
+        return HAL_ERR_OUT_OF_MEMORY;
+    }
+    surf->fdk = fdk_surf;
+    surf->window_owned = false;
+    *out_surface = surf;
+    return HAL_OK;
+}
+
 hal_result hal_surface_save_png(const hal_surface *surface, const char *path) {
     if (!surface || !path)
         return HAL_ERR_INVALID_ARGUMENT;

@@ -298,6 +298,11 @@ void hal_surface_destroy(hal_surface *surface);
  * this). */
 hal_result hal_surface_save_png(const hal_surface *surface, const char *path);
 
+/* Loads a PNG/JPEG/BMP into a new ARGB surface (the platform's
+ * exposed decoder, wrapped). Destroy with hal_surface_destroy. */
+hal_result hal_surface_from_image(const char *path,
+                                  hal_surface **out_surface);
+
 /* ---- Text (FDK's exposed rasterizer, wrapped) ---- */
 
 /* Loads a TrueType/OpenType face at `pixel_size` px of em height.

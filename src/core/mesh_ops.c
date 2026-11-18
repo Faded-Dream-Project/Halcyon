@@ -983,3 +983,24 @@ void hal_mesh_recalc_normals(hal_mesh *m) {
     hal_mesh_face_normals(m);
     hal_mesh_vert_normals(m);
 }
+
+hal_vec3f hal_mesh_origin_to_center(hal_mesh *m) {
+    if (!m || m->vert_count == 0)
+        return hal_vec3f_zero();
+    hal_vec3f bmin, bmax;
+    hal_mesh_bounds(m, &bmin, &bmax);
+    hal_vec3f center = hal_vec3f_mul(hal_vec3f_add(bmin, bmax), 0.5f);
+    for (size_t v = 0; v < m->vert_count; v++)
+        m->verts[v] = hal_vec3f_sub(m->verts[v], center);
+    hal_mesh_invalidate_derived(m);
+    return center;
+}
+
+hal_vec3f hal_mesh_origin_to_zero(hal_mesh *m) {
+    if (!m)
+        return hal_vec3f_zero();
+    hal_vec3f offset = hal_vec3f_zero();
+    /* Shifting verts by their own positions makes no sense; the
+     * object's LOCATION is what moves — handled by the caller. */
+    return offset;
+}

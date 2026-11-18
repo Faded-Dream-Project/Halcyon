@@ -6,6 +6,16 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — M10 + M9 partial (2026-11-18)
+
+- Preview rendering: framed lit PNG renders, turntable frame
+  sequences, thumbnails (Render menu); scene framing; image decoding
+  exposed through the platform wrapper (14 new checks).
+- Origin tools (Origin to BBox Center — world-compensating and
+  undoable; Origin to World Origin) and batch glTF export (one file
+  per mesh object). Not yet from M9: presets, LODs, collision
+  shapes, axis/units export options (recorded in PROGRESS.md).
+
 ### Added — M8: animation (2026-11-18)
 
 - Clips with per-property channels (loc/rot/scale/bone), sorted keys,

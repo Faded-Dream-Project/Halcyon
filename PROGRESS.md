@@ -44,14 +44,16 @@
 
 ## Current state
 
-**M0–M8 complete** (2026-11-18). M8 = animation clips with channels
-and per-key easing, the timeline/dope-sheet strip with scrubbing and
-playback (Space), Insert Key (I) for object TRS and posed bones, clip
-management, clips in the project format, and glTF 2.0 animation
-export (baked 30 fps LINEAR samplers — JSON validity verified with an
-independent parser). Still open from earlier milestones: manual
-weight painting, glTF SKIN export, the curve editor widget (see
-known issues). Next: M9 game-asset workflow, M10 preview render.
+**M0–M8 + M10 complete; M9 PARTIAL** (2026-11-18, second session).
+M10 = preview rendering (framed PNG render, turntable frames,
+thumbnails, Render menu). M9 delivered: origin tools (Origin to BBox
+Center with world-compensating undoable shift, Origin to World
+Origin) and batch glTF export (one .glb per mesh object). M9 NOT
+delivered: asset presets, LOD/decimation, collision-shape export,
+units/axis (Y-up/Z-up) export options. Earlier open items: manual
+weight painting, glTF SKIN export, curve editor widget. Next session:
+finish M9 (presets, LODs, collision shapes, axis options), then M11
+polish.
 
 ### Implemented and tested
 
@@ -346,6 +348,31 @@ known issues). Next: M9 game-asset workflow, M10 preview render.
   the 180-degree quaternion path ambiguity (the test now pins an
   unambiguous target; both arcs are legal halves).
 
+### Implemented and tested — M10: preview rendering (2026-11-18)
+
+- src/render/preview.h/c: scene framing (bounds-sphere fit with
+  margin), lit PNG renders at any size through the viewport
+  rasterizer (gizmo off, grid optional), turntable frame sequences
+  (360-degree orbit, prefix_NNN.png), thumbnails (framed square).
+- Render menu: Preview PNG, Turntable Frames (24 frames), Thumbnail.
+- The platform wrapper gained image DECODING (hal_surface_from_image)
+  so tests (and future texture work) read PNGs back.
+- Tests: test_preview (14 checks — PNG content verification by
+  reloading and counting distinct pixels, turntable frame existence
+  and content, bad-argument refusal).
+
+### Implemented and tested — M9 (partial, 2026-11-18)
+
+- Origin tools: Origin to BBox Center (verts shift, the object
+  location compensates so world geometry stays put; snapshot-undo
+  pushed), Origin to World Origin (location reset).
+- Batch export: File > Batch Export glTF — one .glb per mesh object
+  (clone-scene per object), prefix_NNN.glb naming.
+- NOT implemented from M9 (honest): asset presets for tools/props,
+  LOD generation (decimation), collision-shape export, units and
+  Y-up/Z-up export settings. These are the next session's first
+  tasks.
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -399,6 +426,10 @@ known issues). Next: M9 game-asset workflow, M10 preview render.
 
 ## Log
 
+- **2026-11-18 — M10 complete, M9 partial (second session).**
+  Preview renders (PNG/turntable/thumbnail, framing, image decode in
+  the platform wrapper); origin tools and batch glTF export. M9's
+  presets, LODs, collision shapes and axis settings remain.
 - **2026-11-18 — M8 complete.** Clips, channels, easing, slerp,
   timeline + scrubbing + playback, Insert Key, clip persistence, glTF
   animation export (baked, independently validated). 1925 headless
