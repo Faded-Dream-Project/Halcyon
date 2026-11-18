@@ -551,6 +551,31 @@ case; noted below).
   two-primitive merge (factors, UVs, extraction on disk, decode
   through the texture cache).
 
+### Implemented and tested — interactive curve editor (session 4)
+
+- Core ops (anim.c): hal_clip_key_move (sets time+value, re-sorts
+  the channel, the clip range follows the keys), hal_clip_key_delete
+  (compacts; a channel dies with its last key), hal_clip_clone +
+  hal_clip_destroy (undo snapshots).
+- Widget event hook: hal_widget_set_event_hook — input.c dispatches
+  presses (left AND right, before menus), motion and release to the
+  hit widget (or its ancestor chain); claimed events grab the
+  pointer. The curve editor installs its handler through
+  hal_curves_interactive(clip, on_edit, user).
+- Interactions (ui/curves.c, the normalization math shared with the
+  painter through curves_channel_bounds): drag a key dot moves it in
+  time and value (value bounds frozen at drag start; keys re-sorted;
+  the dragged key re-found through the sort); double-click a key
+  cycles STEP -> LINEAR -> SMOOTH (the easing "handles" in Halcyon's
+  per-key model); double-click empty graph inserts a key into the
+  channel whose curve passes nearest the click; right-click deletes.
+  on_edit(BEGIN/END) brackets each change — the shell snapshots the
+  clip and pushes ONE anim undo command per edit (contents swap).
+- Tests (test_anim, 85 checks): the core ops, plus drag-to-middle
+  (time 0.5 / value 0.5 through two-point bounds), easing cycle,
+  insert-then-delete, all driven by synthesized pointer events
+  through hal_ui_handle_event.
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -604,6 +629,10 @@ case; noted below).
 
 ## Log
 
+- **2026-11-18 — session 4, item 2: interactive curve editor.** Key
+  drag (time+value, re-sorted), easing cycle, insert/delete, one undo
+  per edit; a generic widget event hook in the UI input dispatch.
+  2316 headless checks total.
 - **2026-11-18 — session 4, item 1: robust glTF import.** Foreign
   rigs exact via bone rest offsets (analytically verified against
   hand-built fixtures); materials + textures (embedded, data-URI,

@@ -79,6 +79,21 @@ hal_anim_channel *hal_clip_channel(hal_clip *clip, hal_channel_type type,
                                    hal_object_id object, int bone);
 
 /* Inserts or replaces a key at `time` (keys stay sorted). */
+/* ---- Curve editing (the graph editor's core operations) ----
+ * Moves a key in time (re-sorted) and value; the value is a vec
+ * whose relevant component is used (component channels) or a quat
+ * (rotation channels). */
+bool hal_clip_key_move(hal_clip *clip, size_t channel,
+                       size_t key, hal_f32 time, hal_vec3f vec,
+                       hal_quatf rot);
+/* Deletes a key; the channel dies when its last key goes. */
+bool hal_clip_key_delete(hal_clip *clip, size_t channel, size_t key);
+/* Deep copy (undo snapshots). */
+hal_clip *hal_clip_clone(const hal_clip *clip);
+/* Frees a HEAP clip (a clone); scene-owned clips are freed with the
+ * scene. */
+void hal_clip_destroy(hal_clip *clip);
+
 bool hal_clip_key_vec(hal_clip *clip, hal_channel_type type,
                       hal_object_id object, int bone, hal_f32 time,
                       hal_vec3f value, hal_interp interp);

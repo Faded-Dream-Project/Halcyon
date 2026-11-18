@@ -6,6 +6,14 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — interactive curve editor (2026-11-18, session 4)
+
+- Drag keys in time and value (re-sorted, clip range follows);
+  double-click a key to cycle its easing (step/linear/smooth);
+  double-click empty graph to insert into the nearest channel;
+  right-click to delete. Every edit is a single undo command.
+- New anim ops: hal_clip_key_move / _delete / _clone.
+
 ### Added — robust glTF import (2026-11-18, session 4)
 
 - Foreign rigs import EXACTLY: bones carry rest offsets (the file's

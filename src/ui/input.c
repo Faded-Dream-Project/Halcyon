@@ -236,6 +236,15 @@ bool hal__input_event(hal_ui *ui, const hal_event *event) {
             }
         }
 
+        /* A hooked widget's drag owns all motion. */
+        if (ui->grab && ui->grab->on_event) {
+            if (ui->grab->on_event(ui->grab, (const void *)event,
+                                   ui->grab->on_event_user)) {
+                ui->needs_paint = true;
+                return true;
+            }
+        }
+
         /* The implicit grab (a dragging slider) owns all motion. */
         if (ui->grab && ui->grab->kind == HAL_WIDGET_SLIDER) {
             hal_widget *s = ui->grab;
@@ -262,11 +271,33 @@ bool hal__input_event(hal_ui *ui, const hal_event *event) {
     }
 
     case HAL_EVENT_POINTER_BUTTON_DOWN: {
-        if (event->pointer_button.button != HAL_BUTTON_LEFT)
-            return false;
         hal_f32 x = event->pointer_button.position.x;
         hal_f32 y = event->pointer_button.position.y;
         ui->last_pointer = event->pointer_button.position;
+
+        /* Hooked widgets (the curve editor) get the press FIRST —
+         * left and right alike — and own the drag when they claim
+         * it. Menus are closed at this point (their own handling
+         * below runs after). */
+        if (!ui->open_menubar) {
+            hal_widget *hit = hal__hit_test(ui->root, x, y);
+            hal_widget *hooked = NULL;
+            for (hal_widget *w2 = hit; w2; w2 = w2->parent)
+                if (w2->on_event) {
+                    hooked = w2;
+                    break;
+                }
+            if (hooked && hooked->on_event(hooked,
+                                           (const void *)event,
+                                           hooked->on_event_user)) {
+                ui->grab = hooked;
+                ui->needs_paint = true;
+                return true;
+            }
+        }
+
+        if (event->pointer_button.button != HAL_BUTTON_LEFT)
+            return false;
 
         /* Open menu: the popup activates, the bar switches, anything
          * else closes (the outside click never falls through — the
@@ -382,6 +413,16 @@ bool hal__input_event(hal_ui *ui, const hal_event *event) {
     }
 
     case HAL_EVENT_POINTER_BUTTON_UP: {
+        /* A hooked widget's drag ends wherever the release lands. */
+        if (ui->grab && ui->grab->on_event) {
+            hal_widget *w2 = ui->grab;
+            ui->grab = NULL;
+            w2->on_event(w2, (const void *)event,
+                         w2->on_event_user);
+            ui->needs_paint = true;
+            return true;
+        }
+
         if (event->pointer_button.button != HAL_BUTTON_LEFT)
             return false;
 

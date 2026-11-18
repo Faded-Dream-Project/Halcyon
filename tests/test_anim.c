@@ -304,11 +304,192 @@ static void test_curves_widget(void) {
     hal_ui_destroy(ui);
 }
 
+/* ---- Curve editor interaction (synthesized pointer events) ---- */
+
+static int g_edit_begin = 0, g_edit_end = 0;
+static char g_edit_last_text[64] = { 0 };
+
+static void edit_counter(int phase, const char *text, void *user) {
+    (void)user;
+    if (phase == HAL_CURVES_EDIT_BEGIN)
+        g_edit_begin++;
+    else if (phase == HAL_CURVES_EDIT_END) {
+        g_edit_end++;
+        snprintf(g_edit_last_text, sizeof(g_edit_last_text), "%s",
+                 text ? text : "");
+    }
+}
+
+static bool curve_motion(hal_ui *ui, float x, float y) {
+    hal_event e = { .type = HAL_EVENT_POINTER_MOTION };
+    e.pointer.position = (hal_pointf){ x, y };
+    return hal_ui_handle_event(ui, &e);
+}
+
+static bool curve_press(hal_ui *ui, float x, float y, int button) {
+    hal_event e = { .type = HAL_EVENT_POINTER_BUTTON_DOWN };
+    e.pointer_button.position = (hal_pointf){ x, y };
+    e.pointer_button.button = button == 3 ? HAL_BUTTON_RIGHT
+                                          : HAL_BUTTON_LEFT;
+    return hal_ui_handle_event(ui, &e);
+}
+
+static bool curve_release(hal_ui *ui, float x, float y) {
+    hal_event e = { .type = HAL_EVENT_POINTER_BUTTON_UP };
+    e.pointer_button.position = (hal_pointf){ x, y };
+    e.pointer_button.button = HAL_BUTTON_LEFT;
+    return hal_ui_handle_event(ui, &e);
+}
+
+/* A LOC_X channel 0 -> 1 over [0, 1]; drag the LAST key to the
+ * middle of the graph in time and halfway in value. */
+static void test_curve_key_drag(void) {
+    hal_scene *s = hal_scene_create("C");
+    hal_object_id id = hal_scene_object_add(s, "B", HAL_OBJECT_MESH);
+    int ci = hal_scene_clip_add(s, "Drag");
+    hal_clip *clip = hal_scene_clip(s, ci);
+    clip->end = 1.0f;
+    hal_clip_key_vec(clip, HAL_CH_LOC_X, id, -1, 0.0f,
+                     (hal_vec3f){ 0, 0, 0 }, HAL_INTERP_SMOOTH);
+    hal_clip_key_vec(clip, HAL_CH_LOC_X, id, -1, 1.0f,
+                     (hal_vec3f){ 1, 0, 0 }, HAL_INTERP_SMOOTH);
+
+    hal_ui *ui = hal_ui_create();
+    hal_widget *root = hal_ui_root(ui);
+    hal_widget_set_rect(root, (hal_rectf){ 0, 0, 300, 300 });
+    hal_widget *cw = hal_curves_create(root);
+    hal_widget_set_rect(cw, (hal_rectf){ 10, 10, 200, 150 });
+    hal_curves_interactive(cw, clip, edit_counter, NULL);
+    hal_ui_layout(ui);
+
+    /* Key 2: time=1, value=1 -> screen: x = 10+200 = 210 (right
+     * edge), y = 10 + 0 = 10 (top; bounds are 0..1). */
+    g_edit_begin = g_edit_end = 0;
+    HAL_TEST_CHECK(curve_press(ui, 209, 11, 1));
+    /* Drag to the middle: time 0.5, value ~0.5. */
+    HAL_TEST_CHECK(curve_motion(ui, 110, 85));
+    HAL_TEST_CHECK(curve_release(ui, 110, 85));
+
+    HAL_TEST_CHECK_EQ_I(g_edit_begin, 1);
+    HAL_TEST_CHECK_EQ_I(g_edit_end, 1);
+    /* The channel still has 2 keys; the moved one is at t=0.5 with
+     * value ~0.5 (bounds frozen at 0..1 during the drag). */
+    HAL_TEST_CHECK_EQ_I((int)clip->count, 1);
+    hal_anim_channel *ch = &clip->channels[0];
+    HAL_TEST_CHECK_EQ_I((int)ch->count, 2);
+    HAL_TEST_CHECK_EQ_F(ch->keys[1].time, 0.5f, 0.02f);
+    HAL_TEST_CHECK_EQ_F(ch->keys[1].vec.x, 0.5f, 0.05f);
+    /* Keys stay time-sorted. */
+    HAL_TEST_CHECK(ch->keys[0].time < ch->keys[1].time);
+
+    hal_ui_destroy(ui);
+    hal_scene_destroy(s);
+}
+
+/* Double-click on a key cycles easing; double-click on empty space
+ * inserts; right-click deletes. */
+static void test_curve_insert_delete_easing(void) {
+    hal_scene *s = hal_scene_create("C2");
+    hal_object_id id = hal_scene_object_add(s, "B", HAL_OBJECT_MESH);
+    int ci = hal_scene_clip_add(s, "Edit");
+    hal_clip *clip = hal_scene_clip(s, ci);
+    clip->end = 1.0f;
+    hal_clip_key_vec(clip, HAL_CH_LOC_X, id, -1, 0.0f,
+                     (hal_vec3f){ 0, 0, 0 }, HAL_INTERP_SMOOTH);
+    hal_clip_key_vec(clip, HAL_CH_LOC_X, id, -1, 1.0f,
+                     (hal_vec3f){ 1, 0, 0 }, HAL_INTERP_SMOOTH);
+
+    hal_ui *ui = hal_ui_create();
+    hal_widget *root = hal_ui_root(ui);
+    hal_widget_set_rect(root, (hal_rectf){ 0, 0, 300, 300 });
+    hal_widget *cw = hal_curves_create(root);
+    hal_widget_set_rect(cw, (hal_rectf){ 10, 10, 200, 150 });
+    hal_curves_interactive(cw, clip, edit_counter, NULL);
+    hal_ui_layout(ui);
+
+    /* Double-click the FIRST key (t=0, v=0 -> screen ~(11, 159)):
+     * easing cycles SMOOTH -> STEP. */
+    curve_press(ui, 12, 158, 1);
+    g_edit_begin = g_edit_end = 0;
+    HAL_TEST_CHECK(curve_press(ui, 12, 158, 1));
+    HAL_TEST_CHECK_EQ_I((int)clip->channels[0].keys[0].interp,
+                        (int)HAL_INTERP_STEP);
+    HAL_TEST_CHECK(curve_release(ui, 12, 158));
+
+    /* Double-click empty space mid-graph: a key is inserted into
+     * LOC_X near t=0.5. */
+    g_edit_begin = g_edit_end = 0;
+    curve_press(ui, 60, 100, 1); /* first click (prime) */
+    HAL_TEST_CHECK(curve_press(ui, 60, 100, 1)); /* double-click */
+    HAL_TEST_CHECK_EQ_I((int)clip->channels[0].count, 3);
+    HAL_TEST_CHECK_EQ_I(g_edit_begin, 1);
+    HAL_TEST_CHECK_EQ_I(g_edit_end, 1);
+    HAL_TEST_CHECK_EQ_F(clip->channels[0].keys[1].time, 0.25f,
+                        0.06f);
+
+    /* Right-click the inserted key deletes it. */
+    g_edit_begin = g_edit_end = 0;
+    HAL_TEST_CHECK(curve_press(ui, 60, 100, 3)); /* right button */
+    HAL_TEST_CHECK_EQ_I((int)clip->channels[0].count, 2);
+    HAL_TEST_CHECK_EQ_I(g_edit_begin, 1);
+    HAL_TEST_CHECK_EQ_I(g_edit_end, 1);
+
+    hal_ui_destroy(ui);
+    hal_scene_destroy(s);
+}
+
+/* Core-level: move re-sorts, delete compacts (and kills empty
+ * channels), clone round-trips. */
+static void test_curve_core_ops(void) {
+    hal_scene *s = hal_scene_create("C3");
+    hal_object_id id = hal_scene_object_add(s, "B", HAL_OBJECT_MESH);
+    int ci = hal_scene_clip_add(s, "Ops");
+    hal_clip *clip = hal_scene_clip(s, ci);
+    clip->end = 1.0f;
+    hal_clip_key_vec(clip, HAL_CH_LOC_X, id, -1, 0.0f,
+                     (hal_vec3f){ 0, 0, 0 }, HAL_INTERP_LINEAR);
+    hal_clip_key_vec(clip, HAL_CH_LOC_X, id, -1, 1.0f,
+                     (hal_vec3f){ 1, 0, 0 }, HAL_INTERP_LINEAR);
+
+    /* Move the second key to t=0.25 (between): re-sorted, the range
+     * follows (no key sits at t=1 anymore). */
+    HAL_TEST_CHECK(hal_clip_key_move(clip, 0, 1, 0.25f,
+                                     (hal_vec3f){ 0.5f, 0, 0 },
+                                     hal_quatf_identity()));
+    HAL_TEST_CHECK_EQ_F(clip->channels[0].keys[0].time, 0.0f, 1e-5);
+    HAL_TEST_CHECK_EQ_F(clip->channels[0].keys[1].time, 0.25f, 1e-5);
+    HAL_TEST_CHECK_EQ_F(clip->end, 0.25f, 1e-5);
+
+    /* Clone matches, and edits to the clone do not touch the
+     * original. */
+    hal_clip *cl = hal_clip_clone(clip);
+    HAL_TEST_CHECK(cl != NULL);
+    if (cl) {
+        HAL_TEST_CHECK_EQ_I((int)cl->count, (int)clip->count);
+        HAL_TEST_CHECK_EQ_F(cl->channels[0].keys[1].vec.x, 0.5f,
+                            1e-5);
+        hal_clip_key_delete(cl, 0, 0);
+        hal_clip_key_delete(cl, 0, 0);
+        HAL_TEST_CHECK_EQ_I((int)cl->count, 0); /* channel died */
+        HAL_TEST_CHECK_EQ_I((int)clip->channels[0].count, 2);
+        hal_clip_destroy(cl);
+    }
+
+    /* Delete updates the range (the t=0.25 key goes; only t=0
+     * remains). */
+    hal_clip_key_delete(clip, 0, 1);
+    HAL_TEST_CHECK_EQ_F(clip->end, 0.0f, 1e-5);
+    hal_scene_destroy(s);
+}
+
 int main(void) {
     test_keys_and_sampling();
     test_rotation_and_loop();
     test_bone_channel_and_project_round_trip();
     test_gltf_animation_export();
     test_curves_widget();
+    test_curve_core_ops();
+    test_curve_key_drag();
+    test_curve_insert_delete_easing();
     HAL_TEST_SUMMARY("test_anim");
 }

@@ -28,6 +28,21 @@ struct hal_tree_row {
 
 /* ---- Widgets ---- */
 
+/* The curve editor widget's state (also used by its interaction). */
+typedef struct hal_curves_state {
+    const void *clip; /* borrowed hal_clip (ui cannot see core/anim) */
+    hal_f32 play_time;
+    /* Interactive editing state. */
+    void (*on_edit)(int phase, const char *text, void *user);
+    void *on_edit_user;
+    bool editing;         /* a drag/change is in progress  */
+    int drag_channel;     /* -1 = none                     */
+    int drag_key;
+    hal_f32 vmin, vmax;   /* frozen value bounds at drag   */
+    double last_click_s;  /* double-click detection        */
+    hal_f32 last_click_x, last_click_y;
+} hal_curves_state;
+
 typedef union hal_widget_state {
     struct {
         void (*on_click)(hal_widget *w, void *user);
@@ -54,10 +69,7 @@ typedef union hal_widget_state {
     struct {
         const hal_mesh *mesh; /* borrowed */
     } uvview;
-    struct {
-        const void *clip; /* borrowed hal_clip (ui cannot see core/anim) */
-        hal_f32 play_time;
-    } curves;
+    hal_curves_state curves;
     struct {
         int active;
     } tabs;
@@ -80,6 +92,11 @@ struct hal_widget {
 
     hal_rectf rect;     /* parent-relative, logical                  */
     hal_rectf abs_rect; /* window-logical (valid after layout)       */
+    /* Generic per-widget event hook (the curve editor uses it):
+     * pressed/dragged/released when the widget (or a child) is hit;
+     * returning true consumes the event. */
+    bool (*on_event)(hal_widget *w, const void *event, void *user);
+    void *on_event_user;
     hal_sizef measured; /* measured min size                         */
 
     bool visible;

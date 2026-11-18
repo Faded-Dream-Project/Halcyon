@@ -326,3 +326,110 @@ bool hal_clip_sample_bone(const hal_clip *clip, hal_object_id armature,
     }
     return false;
 }
+
+/* ---- Curve editing ---- */
+
+static int key_time_cmp(const void *a, const void *b) {
+    const hal_keyframe *ka = a, *kb = b;
+    if (ka->time < kb->time)
+        return -1;
+    if (ka->time > kb->time)
+        return 1;
+    return 0;
+}
+
+bool hal_clip_key_move(hal_clip *clip, size_t channel, size_t key,
+                       hal_f32 time, hal_vec3f vec, hal_quatf rot) {
+    if (!clip || channel >= clip->count)
+        return false;
+    hal_anim_channel *ch = &clip->channels[channel];
+    if (key >= ch->count)
+        return false;
+    ch->keys[key].time = time;
+    ch->keys[key].vec = vec;
+    ch->keys[key].rot = rot;
+    qsort(ch->keys, ch->count, sizeof(hal_keyframe), key_time_cmp);
+
+    /* The clip range follows the keys. */
+    clip->end = clip->start;
+    for (size_t i = 0; i < clip->count; i++)
+        for (size_t k = 0; k < clip->channels[i].count; k++)
+            if (clip->channels[i].keys[k].time > clip->end)
+                clip->end = clip->channels[i].keys[k].time;
+    return true;
+}
+
+bool hal_clip_key_delete(hal_clip *clip, size_t channel,
+                         size_t key) {
+    if (!clip || channel >= clip->count)
+        return false;
+    hal_anim_channel *ch = &clip->channels[channel];
+    if (key >= ch->count)
+        return false;
+    memmove(&ch->keys[key], &ch->keys[key + 1],
+            (ch->count - key - 1) * sizeof(hal_keyframe));
+    ch->count--;
+    if (ch->count == 0) {
+        /* The channel dies with its last key. */
+        free(ch->keys);
+        memmove(&clip->channels[channel],
+                &clip->channels[channel + 1],
+                (clip->count - channel - 1) *
+                    sizeof(hal_anim_channel));
+        clip->count--;
+    }
+    clip->end = clip->start;
+    for (size_t i = 0; i < clip->count; i++)
+        for (size_t k = 0; k < clip->channels[i].count; k++)
+            if (clip->channels[i].keys[k].time > clip->end)
+                clip->end = clip->channels[i].keys[k].time;
+    return true;
+}
+
+hal_clip *hal_clip_clone(const hal_clip *clip) {
+    if (!clip)
+        return NULL;
+    hal_clip *out = malloc(sizeof(*out));
+    if (!out)
+        return NULL;
+    *out = *clip;
+    out->count = 0;
+    out->cap = clip->cap;
+    out->channels = NULL;
+    if (clip->count > 0) {
+        out->channels = malloc(clip->count *
+                               sizeof(hal_anim_channel));
+        if (!out->channels) {
+            free(out);
+            return NULL;
+        }
+        for (size_t i = 0; i < clip->count; i++) {
+            out->channels[i] = clip->channels[i];
+            out->channels[i].keys = NULL;
+            if (clip->channels[i].count > 0) {
+                out->channels[i].keys = malloc(
+                    clip->channels[i].count *
+                    sizeof(hal_keyframe));
+                if (!out->channels[i].keys) {
+                    out->channels[i].count = 0;
+                    continue;
+                }
+                memcpy(out->channels[i].keys,
+                       clip->channels[i].keys,
+                       clip->channels[i].count *
+                           sizeof(hal_keyframe));
+            }
+        }
+        out->count = clip->count;
+    }
+    return out;
+}
+
+void hal_clip_destroy(hal_clip *clip) {
+    if (!clip)
+        return;
+    for (size_t i = 0; i < clip->count; i++)
+        free(clip->channels[i].keys);
+    free(clip->channels);
+    free(clip);
+}

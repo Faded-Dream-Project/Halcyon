@@ -156,6 +156,13 @@ hal_rectf hal_tree_row_rect(hal_widget *tree, const hal_tree_row *row);
 hal_widget *hal_uvview_create(hal_widget *parent);
 void hal_uvview_bind(hal_widget *uvview, const hal_mesh *mesh);
 
+/* Installs a generic per-widget event hook (pressed/dragged/
+ * released; true consumes). Used by the curve editor. */
+void hal_widget_set_event_hook(
+    hal_widget *w,
+    bool (*on_event)(hal_widget *w, const void *event, void *user),
+    void *user);
+
 /* Curve editor: draws the bound clip's channels as value-over-time
  * graphs (vec channels: x/y/z lines; rotation: x/y/z/w), key dots,
  * and a playhead at `play_time`. READ-ONLY visualization — scrubbing
@@ -164,6 +171,26 @@ void hal_uvview_bind(hal_widget *uvview, const hal_mesh *mesh);
 hal_widget *hal_curves_create(hal_widget *parent);
 void hal_curves_bind(hal_widget *curves, const void *clip);
 void hal_curves_set_playhead(hal_widget *curves, hal_f32 time);
+
+/* Curve EDITING phases, reported through on_edit. */
+typedef enum hal_curves_edit_phase {
+    HAL_CURVES_EDIT_BEGIN, /* about to change: snapshot for undo */
+    HAL_CURVES_EDIT_END,   /* edit finished: push the undo cmd  */
+    HAL_CURVES_EDIT_INFO   /* transient message text in `text`   */
+} hal_curves_edit_phase;
+
+/* Makes the curve editor interactive:
+ *   - drag a key dot: moves it in time AND value (re-sorted)
+ *   - double-click a key: cycles its easing (step/linear/smooth)
+ *   - double-click empty graph: inserts a key into the channel
+ *     whose value band contains the click
+ *   - right-click a key: deletes it
+ * `clip` becomes a NON-CONST binding (editing); on_edit(BEGIN/END)
+ * brackets each change for undo, INFO reports status text. */
+void hal_curves_interactive(
+    hal_widget *curves, void *clip,
+    void (*on_edit)(int phase, const char *text, void *user),
+    void *user);
 
 /* Menu bar: menus with items. Items act through on_activate. */
 hal_widget *hal_menubar_create(hal_widget *parent);

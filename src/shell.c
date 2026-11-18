@@ -408,6 +408,83 @@ static void mesh_cmd_free(void *state) {
     free(c);
 }
 
+/* ---- Animation (clip) undo ---- */
+
+typedef struct anim_cmd {
+    size_t clip_index;
+    hal_clip *snapshot; /* pre-edit contents; swap for undo/redo */
+} anim_cmd;
+
+/* Swaps the clip's CONTENTS in place (the scene owns the slot; the
+ * snapshot owns its own channel arrays, so pointer-swapping is
+ * ownership-swapping). */
+static void anim_swap(hal_scene *scene, size_t index,
+                      hal_clip **with) {
+    if (!scene || index >= scene->clip_count)
+        return;
+    hal_clip tmp = scene->clips[index];
+    scene->clips[index] = **with;
+    **with = tmp;
+}
+
+static void anim_cmd_apply(void *state, void *ctx) {
+    anim_cmd *c = state;
+    anim_swap(ctx, c->clip_index, &c->snapshot);
+}
+
+static void anim_cmd_revert(void *state, void *ctx) {
+    anim_cmd *c = state;
+    anim_swap(ctx, c->clip_index, &c->snapshot);
+}
+
+static void anim_cmd_free(void *state) {
+    anim_cmd *c = state;
+    hal_clip_destroy(c->snapshot);
+    free(c);
+}
+
+/* The curve editor's edit callback: BEGIN snapshots, END pushes one
+ * undo command per edit, INFO reports status. */
+static hal_clip *curves_edit_snapshot = NULL;
+
+static void curves_edit_notify(int phase, const char *text,
+                               void *user) {
+    hal_app *app = user;
+    switch (phase) {
+    case HAL_CURVES_EDIT_BEGIN: {
+        hal_clip *clip =
+            hal_scene_clip(app->scene, app->active_clip);
+        hal_clip_destroy(curves_edit_snapshot);
+        curves_edit_snapshot = hal_clip_clone(clip);
+        break;
+    }
+    case HAL_CURVES_EDIT_END: {
+        if (curves_edit_snapshot && app->active_clip >= 0) {
+            anim_cmd *cmd = malloc(sizeof(*cmd));
+            if (cmd) {
+                cmd->clip_index = (size_t)app->active_clip;
+                cmd->snapshot = curves_edit_snapshot;
+                curves_edit_snapshot = NULL;
+                hal_undo_stack_push(app->undo, "Curve Edit",
+                                    anim_cmd_apply,
+                                    anim_cmd_revert, anim_cmd_free,
+                                    cmd);
+            }
+        }
+        hal_clip_destroy(curves_edit_snapshot);
+        curves_edit_snapshot = NULL;
+        app->dirty = true;
+        if (text)
+            set_status(app, "Curve editor: %s", text);
+        break;
+    }
+    default:
+        if (text)
+            set_status(app, "Curve editor: easing %s", text);
+        break;
+    }
+}
+
 /* Runs a mesh operator on the edited object with a snapshot pushed
  * onto the undo stack. op returns true when the mesh changed. */
 static void apply_mesh_op(hal_app *app, const char *label,
@@ -1865,6 +1942,10 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
 
     hal_widget *curve_panel = hal_panel_create(sidebar, "Curves");
     app->curves = hal_curves_create(curve_panel);
+    /* Editing (drag keys, cycle easing, insert/delete); the clip is
+     * re-bound every paint, the edit callback persists. */
+    hal_curves_interactive(app->curves, NULL, curves_edit_notify,
+                           app);
 
     /* Status bar. */
     app->status = hal_label_create(hal_ui_root(app->ui), "Welcome");

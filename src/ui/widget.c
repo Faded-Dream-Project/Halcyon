@@ -258,3 +258,13 @@ static void menubar_data_free(hal_widget *w) {
     free(data);
     w->user_data = NULL;
 }
+
+void hal_widget_set_event_hook(
+    hal_widget *w,
+    bool (*on_event)(hal_widget *w, const void *event, void *user),
+    void *user) {
+    if (!w)
+        return;
+    w->on_event = on_event;
+    w->on_event_user = user;
+}
