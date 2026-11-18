@@ -140,3 +140,16 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 -include $(wildcard $(BUILD_DIR)/obj/*.d $(BUILD_DIR)/obj/*/*.d)
+
+# Benchmark: frame time at 10k/50k/100k triangles (docs/performance.md).
+.PHONY: bench
+# Clean -O2 objects (no sanitizers) so the numbers are honest.
+BENCH_OBJ_DIR := build/bench-obj
+bench: tests/bench.c $(shell find src -name '*.c' ! -name 'main.c')
+	@mkdir -p $(BENCH_OBJ_DIR)
+	@for f in $(shell find src -name '*.c' ! -name 'main.c'); do \
+		o=$(BENCH_OBJ_DIR)/$$(echo $$f | sed 's|^src/||; s|/|_|g; s|\.c$$|.o|'); \
+		cc -Isrc $(shell pkg-config --cflags fdk) -std=c17 -O2 -D_POSIX_C_SOURCE=200809L -c $$f -o $$o || exit 1; \
+	done
+	$(CC) -Isrc $(shell pkg-config --cflags fdk) -O2 tests/bench.c $(BENCH_OBJ_DIR)/*.o -o build/bench $(LDFLAGS)
+	@echo "== benchmark build done (build/bench) =="

@@ -139,8 +139,11 @@ void hal_raster_triangle(hal_raster *r, hal_vec3f a, hal_f32 ia,
     if (area > 0.0f)
         return; /* back-facing */
 
-    /* Perspective-correct intensity: interpolate i/w and 1/w, divide
-     * at the pixel. Screen-space z (NDC) interpolates linearly. */
+    /* FLAT fast path (the common viewport case: one lambert value for
+     * the whole face): the packed color is computed once and the
+     * inner loop reduces to edge stepping + z + write. */
+    const bool flat = ia == ib && ib == ic;
+
     hal_f32 iaw = ia, ibw = ib, icw = ic;
 
     hal_f32 minx = fminf(ax, fminf(bx, cx));
@@ -158,6 +161,45 @@ void hal_raster_triangle(hal_raster *r, hal_vec3f a, hal_f32 ia,
 
     hal_f32 inv_area = 1.0f / area;
 
+    if (flat) {
+        /* Incremental edge stepping: the edge functions are affine in
+         * (x, y), so each pixel costs three adds per function. */
+        const hal_u32 packed =
+            color_pack(color_shade(color, ia));
+        const hal_f32 px0 = (hal_f32)x0 + 0.5f;
+        const hal_f32 py0 = (hal_f32)y0 + 0.5f;
+        hal_f32 w0r = (bx - ax) * (py0 - ay) - (px0 - ax) * (by - ay);
+        hal_f32 w1r = (cx - bx) * (py0 - by) - (px0 - bx) * (cy - by);
+        hal_f32 w2r = (ax - cx) * (py0 - cy) - (px0 - cx) * (ay - cy);
+        const hal_f32 w0dx = ay - by; /* dE_ab/dx */
+        const hal_f32 w1dx = by - cy; /* dE_bc/dx */
+        const hal_f32 w2dx = cy - ay; /* dE_ca/dx */
+        const hal_f32 w0dy = bx - ax; /* dE_ab/dy */
+        const hal_f32 w1dy = cx - bx;
+        const hal_f32 w2dy = ax - cx;
+        for (hal_i32 y = y0; y < y1; y++) {
+            hal_f32 w0 = w0r, w1 = w1r, w2 = w2r;
+            for (hal_i32 x = x0; x < x1; x++) {
+                if (w0 <= 0.0f && w1 <= 0.0f && w2 <= 0.0f) {
+                    hal_f32 b_a = w1 * inv_area,
+                            b_b = w2 * inv_area,
+                            b_c = w0 * inv_area;
+                    hal_f32 z =
+                        b_a * a.z + b_b * b.z + b_c * c.z;
+                    px(r, x, y, z, packed);
+                }
+                w0 += w0dx;
+                w1 += w1dx;
+                w2 += w2dx;
+            }
+            w0r += w0dy;
+            w1r += w1dy;
+            w2r += w2dy;
+        }
+        return;
+    }
+
+    /* Smooth path (affine intensity — see the header note). */
     for (hal_i32 y = y0; y < y1; y++) {
         for (hal_i32 x = x0; x < x1; x++) {
             hal_f32 px_ = (hal_f32)x + 0.5f;
@@ -165,14 +207,10 @@ void hal_raster_triangle(hal_raster *r, hal_vec3f a, hal_f32 ia,
             hal_f32 w0 = (bx - ax) * (py_ - ay) - (px_ - ax) * (by - ay);
             hal_f32 w1 = (cx - bx) * (py_ - by) - (px_ - bx) * (cy - by);
             hal_f32 w2 = (ax - cx) * (py_ - cy) - (px_ - cx) * (ay - cy);
-            /* Same winding as the area test: all <= 0 inside. */
             if (w0 > 0.0f || w1 > 0.0f || w2 > 0.0f)
                 continue;
             /* Edge-function to barycentric binding: E_ab (w0) is the
-             * weight of vertex C, E_bc (w1) of A, E_ca (w2) of B.
-             * (A cyclic misbinding lived here since M3 — invisible
-             * with flat shading and constant-z triangles, wrong for
-             * smooth shading and depth; caught by the UV test.) */
+             * weight of vertex C, E_bc (w1) of A, E_ca (w2) of B. */
             hal_f32 b_a = w1 * inv_area, b_b = w2 * inv_area,
                     b_c = w0 * inv_area;
             hal_f32 z = b_a * a.z + b_b * b.z + b_c * c.z;

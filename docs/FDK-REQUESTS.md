@@ -75,3 +75,23 @@ fdk_result fdk_font_rasterize_utf8(const fdk_font *font,
                                    int stride, fdk_glyph_box *out);
 ```
 **Fallback.** Offscreen surface + copy (in use today).
+
+## GPU viewport path (requested 2026-11-18, Halcyon session 3)
+
+Halcyon's viewport rasterizes on the CPU (see docs/performance.md:
+~73 fps at 100k triangles single-threaded at 1280x720 on a slow
+sandbox — fine for v0.1, but texture sampling and antialiasing will
+raise the per-pixel cost). Requested, in preference order:
+
+1. A window-system-backed GPU surface (Vulkan preferred, OpenGL ES
+   acceptable) that `hal_surface` can wrap, so Halcyon can hand the
+   rasterizer's output — or ideally render — on the GPU.
+2. Even without a full GPU API: a blit path that uploads a CPU
+   framebuffer as a texture (zero-copy when possible) — this alone
+   removes the final CPU copy from the present path.
+3. Shader-adjacent primitives are NOT needed; Halcyon's rasterizer
+   already computes shading, UVs, skinning and texturing and would
+   only need the surface/blit layer.
+
+Use case: viewport interactivity at 200k+ triangles with bilinear
+texturing on mid-range hardware (Intel i5-8400 class).
