@@ -30,7 +30,7 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 - Snapping on gizmo drags (Ctrl-hold): grid 0.25, increment 0.1,
   vertex; View menu + Frame Selected (F). Edge slide deferred.
 
-## [v0.2.0] — 2026-11-18
+## [Batch 2026-11-18 (b)] — unreleased work
 
 Robust glTF import (foreign rigs exact, materials, textures in all
 three flavors, multi-primitive meshes), the fully interactive curve
@@ -59,7 +59,7 @@ collider export (_UCX naming convention, D-016).
   <glb>-textures/); multi-primitive meshes merge with UVs and skin
   influences.
 
-## [v0.1.0] — 2026-11-18
+## [Batch 2026-11-18 (a)] — unreleased work
 
 The first usable release: modeling, materials/UVs with textures,
 rigging/skinning, animation, glTF (with skins) + OBJ + STL

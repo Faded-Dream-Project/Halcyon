@@ -39,10 +39,12 @@ and an expert should never fight the interface.
 | --- | --- |
 | ![The Halcyon editor](docs/screenshots/editor.png) | ![A posed character render](docs/screenshots/character-wave.png) |
 
-## Status: v0.1.0
+## Status: PRE-ALPHA — NOT READY FOR USE
 
-The first usable release. What works, tested (2186 headless checks +
-a display tier):
+**Halcyon is pre-alpha software.** It is under active development,
+the editor UI has known visual defects on real desktops, and nothing
+here is a release. Do not rely on it. What currently works in
+headless tests (2771 checks + a display tier):
 
 - **Modeling** — mesh edit mode with vertex/edge/face selection,
   extrude, inset, bevel, loop cut, subdivide, merge, delete, mirror,
@@ -100,7 +102,7 @@ Requirements:
 
 ```sh
 make              # debug build (ASan+UBSan): build/halcyon
-make release      # optimized build
+make              # optimized build (make fast for debug)
 make test         # headless test suite (no display needed)
 make test-display # window smoke test under a throwaway Xvfb
 ./build/halcyon   # run

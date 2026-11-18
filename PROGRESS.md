@@ -44,6 +44,13 @@
 
 ## Current state
 
+**PRE-ALPHA — NOT READY FOR USE.** Both former tags (v0.1.0, v0.2.0)
+were DELETED on 2026-11-18 after a real-desktop screenshot showed
+the editor UI is visibly broken at 1920x1080 (vertically clipped
+text, truncated menu popups, overflowing property rows, a wrongly
+projected ground grid). Nothing is a release; no tag or release
+will be created unless explicitly requested.
+
 Session 3 (2026-11-18): items 1-3 of the release plan DONE (all
 pushed). Item 1: glTF skins. Item 2: texture sampling + the
 barycentric-misbinding fix. Item 3 (M9 remainder): asset presets
