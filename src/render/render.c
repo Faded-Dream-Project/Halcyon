@@ -4,10 +4,12 @@
 
 #include "render.h"
 
+#include "../core/armature.h"
 #include "../core/material.h"
 #include "raster.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 hal_render_opts hal_render_opts_default(void) {
@@ -381,16 +383,79 @@ void hal_render_view(hal_raster *raster, hal_scene *scene,
         if (!obj->mesh)
             continue;
 
+        /* A skinned mesh renders its posed positions. The copy is a
+         * stack struct whose cached-pointer fields would LEAK any
+         * caches it computes, so warm the ORIGINAL's caches first and
+         * the copy only borrows them. */
+        hal_object *arm_obj =
+            obj->skin_armature != HAL_OBJECT_ID_NONE
+                ? hal_scene_object(scene, obj->skin_armature)
+                : NULL;
+        /* The stack copy below borrows the ORIGINAL's caches; warm
+         * them first or the copy would compute (and leak) its own. */
+        if (opts->shading == HAL_SHADING_SOLID) {
+            hal_mesh_face_normals(obj->mesh);
+            if (obj->smooth_shading)
+                hal_mesh_vert_normals(obj->mesh);
+        }
+        hal_mesh render_mesh_src = *obj->mesh;
+        hal_vec3f *posed_verts = NULL;
+        if (arm_obj && arm_obj->armature) {
+            hal_mesh_face_normals(obj->mesh);
+            hal_mesh_vert_normals(obj->mesh);
+            posed_verts = malloc(obj->mesh->vert_count *
+                                 sizeof(hal_vec3f));
+            if (posed_verts &&
+                hal_mesh_apply_pose(obj->mesh, arm_obj->armature,
+                                    posed_verts)) {
+                render_mesh_src = *obj->mesh;
+                render_mesh_src.verts = posed_verts;
+            }
+        }
+
         if (opts->shading == HAL_SHADING_WIREFRAME) {
-            render_mesh_wire(raster, obj->mesh, world, view_proj, ox, oy,
-                             vw, vh,
+            render_mesh_wire(raster, &render_mesh_src, world, view_proj,
+                             ox, oy, vw, vh,
                              object_base_color(scene, obj, opts->object));
         } else {
-            render_mesh_solid(raster, obj->mesh, world, view_proj,
+            render_mesh_solid(raster, &render_mesh_src, world, view_proj,
                               hal_camera_eye(cam), obj->smooth_shading,
                               ox, oy, vw, vh,
                               object_base_color(scene, obj, opts->object));
         }
+        free(posed_verts);
+    }
+
+    /* Armatures draw as stick figures (2D overlay in world space). */
+    for (size_t i = 0; i < scene->count; i++) {
+        hal_object *obj = &scene->objects[i];
+        if (!obj->visible || !obj->armature)
+            continue;
+        hal_armature *arm = obj->armature;
+        hal_bone_pose *poses = malloc(arm->count * sizeof(*poses));
+        if (!poses)
+            continue;
+        hal_armature_pose(arm, poses);
+        hal_mat4f world = hal_object_world_matrix(scene, obj);
+        hal_mat4f vpm2 = hal_mat4f_mul(view_proj, world);
+        for (size_t b = 0; b < arm->count; b++) {
+            hal_f32 w0, w1;
+            hal_vec3f s0 = hal_camera_project(
+                cam, vpm2, poses[b].head, viewport, &w0);
+            hal_vec3f s1 = hal_camera_project(
+                cam, vpm2, poses[b].tail, viewport, &w1);
+            if (w0 <= 0.0f || w1 <= 0.0f)
+                continue;
+            hal_color bone_color =
+                arm->bones[b].selected
+                    ? hal_color_rgb8(0x8B, 0x7E, 0xC8)
+                    : hal_color_rgb8(0xE8, 0xE4, 0xF8);
+            hal_canvas_draw_line(canvas, s0.x, s0.y, s1.x, s1.y,
+                                 bone_color);
+            hal_canvas_fill_circle(canvas, s0.x, s0.y, 3.5f,
+                                   bone_color);
+        }
+        free(poses);
     }
 
     /* The gizmo draws on the canvas (2D overlay, unclipped by the

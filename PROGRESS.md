@@ -44,12 +44,14 @@
 
 ## Current state
 
-**M0–M6 complete** (2026-11-18). M6 = PBR-style materials + texture
-slots, UV unwrap (planar/box/smart-lite), the UV editor widget, glTF
-export with materials/UVs/embedded textures, project format v3. Next:
-M7 rigging (armatures, bones, parenting, auto weights, weight paint,
-simple IK; skins in the glTF export), then M8 animation. Resume from
-src/core/ (new bone/armature structures) and src/io/gltf.c (skins).
+**M0–M7 complete** (2026-11-18). M7 = armatures (bones, chains, pose
+mode), automatic weights, skinning in the viewport, analytic 2-bone IK
+(tip-to-mouse), armature/bones/skin-weights in the project format.
+NOT done from M7's list: manual weight painting and glTF SKIN export
+(both recorded below as the first M8-session tasks, alongside the
+animation timeline). Next: M8 animation (timeline, keyframes, dope
+sheet, curve editor, playback, clips) + the glTF skin/animation
+export tail.
 
 ### Implemented and tested
 
@@ -290,6 +292,37 @@ src/core/ (new bone/armature structures) and src/io/gltf.c (skins).
   order, and a heap overflow where a non-NUL-terminated build buffer
   reached %s (ASan).
 
+### Implemented and tested — M7: rigging (2026-11-18)
+
+- Armatures (src/core/armature.h/c): bones as rest head/tail
+  segments with parents in armature space; a local pose rotation per
+  bone; chain posing where a child's rest positions ride the parent's
+  posed matrix (rotating a parent swings descendants, children stay
+  attached to posed tails).
+- Skinning: 4 influences per vertex (bone index + weight), automatic
+  weights by nearest-bone-segment inverse-square (2 strongest,
+  normalized — not heat diffusion, documented); the standard
+  inverse-bind formulation p' = Σ w·P·B⁻¹·p; the viewport renders
+  skinned meshes posed.
+- Analytic 2-bone IK (law of cosines, bend plane from the chain and
+  target direction, reach clamped to the annulus) — the lower bone's
+  pose is correctly LOCAL (cancels the parent's rotation); the
+  classic trap the tests caught.
+- Editor: Add > Armature; pose mode (Tab on an armature) with bone
+  picking (projected segment distance), R bone-rotate modal (world
+  Y), Add Bone (child), Bind Mesh to Armature (auto weights), Solve
+  IK (tip toward the mouse ray at the tip's height plane). Armatures
+  draw as stick figures with selected bones highlighted.
+- Project format: bones (rest + pose), skin references, and weight
+  blocks round trip; the format version constant was bumped to 3
+  (files written before this commit say version 1 but parse fine —
+  the loader accepts 1..3).
+- Tests: test_rig (42 checks — chain posing, weight sums, unposed
+  identity, posed deformation, IK reach + clamped reach, project
+  round trip). Bugs caught: the degenerate IK bend axis, the
+  local-vs-world lower-bone rotation, and an unsigned parse of the
+  signed bone parent.
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -297,6 +330,11 @@ src/core/ (new bone/armature structures) and src/io/gltf.c (skins).
   refinement. Bevel handles single manifold edges only (vertex
   bevels out of scope). glTF import flattens node hierarchies into
   world transforms (parenting is baked; geometry exact).
+- M7 leftovers (first tasks of the next session): manual weight
+  PAINTING (auto weights exist; the brush UI does not) and glTF SKIN
+  export (bones/joints/weights; the armature stays a Halcyon-side
+  structure until then). IK assumes the chain root's parent is
+  unposed; the bone-rotate modal is world-Y only.
 - Viewport texture SAMPLING is not implemented (materials shade by
   base color + emissive; textures are authored, previewed in the UV
   editor, and exported). glTF import ignores materials/textures.
@@ -336,6 +374,11 @@ src/core/ (new bone/armature structures) and src/io/gltf.c (skins).
 
 ## Log
 
+- **2026-11-18 — M7 complete.** Armatures with chain posing,
+  automatic weights + skinning in the viewport, analytic 2-bone IK,
+  pose mode with bone picking and rotation, armature persistence.
+  1836 headless checks total (42 new). Weight painting and glTF skin
+  export recorded as next-session tasks.
 - **2026-11-18 — M6 complete.** Materials + texture slots, per-corner
   UVs with compaction-safe storage, three unwraps, the UV editor,
   glTF materials/UVs/embedded textures, format v3. 1784 headless

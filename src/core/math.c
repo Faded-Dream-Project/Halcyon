@@ -286,3 +286,26 @@ hal_quatf hal_quatf_slerp(hal_quatf a, hal_quatf b, hal_f32 t) {
     return hal_quatf_make(a.x * s0 + b.x * s1, a.y * s0 + b.y * s1,
                           a.z * s0 + b.z * s1, a.w * s0 + b.w * s1);
 }
+
+hal_quatf hal_quatf_between(hal_vec3f from, hal_vec3f to) {
+    from = hal_vec3f_normalize(from);
+    to = hal_vec3f_normalize(to);
+    hal_f32 d = hal_vec3f_dot(from, to);
+    if (d > 0.99999f)
+        return hal_quatf_identity();
+    if (d < -0.99999f) {
+        /* Opposed: any axis perpendicular to `from` by 180 degrees. */
+        hal_vec3f axis = hal_vec3f_cross(from, hal_vec3f_axis_x());
+        if (hal_vec3f_length_sq(axis) < 1e-8f)
+            axis = hal_vec3f_cross(from, hal_vec3f_axis_y());
+        return hal_quatf_from_axis_angle(
+            hal_vec3f_normalize(axis), HAL_PI_f32);
+    }
+    hal_vec3f axis = hal_vec3f_cross(from, to);
+    /* w = cos(theta/2) = sqrt((1 + dot) / 2); the vector part is the
+     * (unnormalized) cross product scaled to sin(theta/2). */
+    hal_f32 s = (hal_f32)__builtin_sqrt((double)((1.0f + d) * 0.5f));
+    hal_f32 vs = 0.5f / s;
+    return hal_quatf_normalize(
+        hal_quatf_make(axis.x * vs, axis.y * vs, axis.z * vs, s));
+}

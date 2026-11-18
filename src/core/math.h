@@ -407,6 +407,10 @@ hal_vec3f hal_quatf_to_euler_xyz(hal_quatf q);
  * the short arc. */
 hal_quatf hal_quatf_slerp(hal_quatf a, hal_quatf b, hal_f32 t);
 
+/* The minimal rotation taking unit vector `from` to unit vector `to`
+ * (identity when parallel; any perpendicular axis when opposed). */
+hal_quatf hal_quatf_between(hal_vec3f from, hal_vec3f to);
+
 #ifdef __cplusplus
 }
 #endif

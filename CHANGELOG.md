@@ -6,6 +6,19 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — M7: rigging (2026-11-18)
+
+- Armatures: bones with parents, local pose rotations, chain posing.
+- Skinning: 4 influences/vertex, automatic nearest-segment weights,
+  inverse-bind deformation rendered in the viewport.
+- Analytic 2-bone IK with reach clamping (tip-to-mouse in the UI).
+- Pose mode: bone picking, bone-rotate modal, add child bone, bind
+  mesh to armature; armature stick-figure drawing.
+- Project format: bones, poses, skin refs, weight blocks (version 3).
+- Tests: test_rig — 42 checks (chain posing, weight sums, IK reach
+  and clamp, round trip). Known gaps, recorded in PROGRESS.md:
+  manual weight painting and glTF skin export.
+
 ### Added — M6: materials & UVs (2026-11-18)
 
 - PBR-style materials (base color, metallic, roughness, emissive,

@@ -9,6 +9,10 @@
 
 #include "project.h"
 
+#define HAL_PROJECT_FORMAT_VERSION 3
+
+#include "armature.h"
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -110,6 +114,43 @@ hal_result hal_project_save(const hal_scene *scene, const char *path,
                                : "") > 0;
         if (o->material >= 0)
             ok = ok && fprintf(f, "  mat %d\n", o->material) > 0;
+        if (o->skin_armature != HAL_OBJECT_ID_NONE)
+            ok = ok && fprintf(f, "  skin %u\n",
+                               (unsigned)o->skin_armature) > 0;
+        if (o->armature) {
+            for (size_t b = 0; ok && b < o->armature->count; b++) {
+                const hal_bone *bone = &o->armature->bones[b];
+                ok = ok &&
+                     fprintf(f,
+                             "  bone %zu \"%s\" %d"
+                             " %.9g %.9g %.9g %.9g %.9g %.9g"
+                             " %.9g %.9g %.9g %.9g\n",
+                             b, bone->name, bone->parent,
+                             (double)bone->head.x,
+                             (double)bone->head.y,
+                             (double)bone->head.z,
+                             (double)bone->tail.x,
+                             (double)bone->tail.y,
+                             (double)bone->tail.z,
+                             (double)bone->pose.x,
+                             (double)bone->pose.y,
+                             (double)bone->pose.z,
+                             (double)bone->pose.w) > 0;
+            }
+        }
+        if (o->mesh && o->mesh->skin_weights) {
+            ok = ok && fprintf(f, "  weights %zu\n",
+                               o->mesh->vert_count) > 0;
+            for (size_t v = 0; ok && v < o->mesh->vert_count; v++) {
+                ok = ok && fprintf(f, "  wv") > 0;
+                for (size_t wi = 0; ok && wi < 4; wi++)
+                    ok = fprintf(f, " %d %.9g",
+                                 o->mesh->skin_bones[v * 4 + wi],
+                                 (double)o->mesh->skin_weights[v * 4 + wi]) >
+                         0;
+                ok = ok && fprintf(f, "\n") > 0;
+            }
+        }
         if (o->mesh) {
             const hal_mesh *mm = o->mesh;
             ok = ok && fprintf(f, "  mesh %zu %zu %zu\n", mm->vert_count,
@@ -452,6 +493,11 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
             consume_line(&p);
 
             hal_object_id new_id = hal_scene_object_add(scene, name, type);
+            if (type == HAL_OBJECT_ARMATURE) {
+                hal_armature *arm = hal_armature_create();
+                if (arm)
+                    hal_object_set_armature(scene, new_id, arm);
+            }
             free(name);
             free(type_tok);
             if (new_id == HAL_OBJECT_ID_NONE) {
@@ -587,6 +633,161 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
             }
             obj->material = (int)mat;
             consume_line(&p);
+        } else if (strcmp(key, "skin") == 0) {
+            hal_object *obj = hal_scene_object(scene, current);
+            if (!obj) {
+                set_err(err, err_cap,
+                        "line %d: 'skin' outside an object block",
+                        line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            hal_u32 skin = 0;
+            if (!parse_u32(&p, &skin) || !expect_end_of_line(&p)) {
+                set_err(err, err_cap,
+                        "line %d: skin wants one id", line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            obj->skin_armature = skin;
+        } else if (strcmp(key, "bone") == 0) {
+            hal_object *obj = hal_scene_object(scene, current);
+            if (!obj || !obj->armature) {
+                set_err(err, err_cap,
+                        "line %d: 'bone' outside an armature object",
+                        line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            hal_u32 idx = 0;
+            int parent = -2;
+            char *name = NULL;
+            hal_f32 h[3], t[3], q[4];
+            bool ok_line = parse_u32(&p, &idx);
+            if (ok_line)
+                name = parse_quoted(&p);
+            if (ok_line) {
+                /* The parent is signed (-1 = root); parse_u32 would
+                 * reject the wrapped -1. */
+                char *tok = parse_word(&p);
+                if (tok) {
+                    parent = (int)strtol(tok, NULL, 10);
+                    free(tok);
+                } else {
+                    ok_line = false;
+                }
+            }
+            for (int i = 0; ok_line && i < 3; i++)
+                ok_line = parse_float(&p, &h[i]);
+            for (int i = 0; ok_line && i < 3; i++)
+                ok_line = parse_float(&p, &t[i]);
+            for (int i = 0; ok_line && i < 4; i++)
+                ok_line = parse_float(&p, &q[i]);
+            if (!ok_line || !expect_end_of_line(&p)) {
+                set_err(err, err_cap,
+                        "line %d: bone wants: idx \"name\" parent"
+                        " head(3) tail(3) pose(4)",
+                        line_no);
+                free(name);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            consume_line(&p);
+            int added = hal_armature_bone_add(
+                obj->armature, name, hal_vec3f_make(h[0], h[1], h[2]),
+                hal_vec3f_make(t[0], t[1], t[2]), parent);
+            free(name);
+            if (added < 0 || (size_t)added != idx) {
+                set_err(err, err_cap,
+                        "line %d: bone index %u out of order", line_no,
+                        (unsigned)idx);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            obj->armature->bones[added].pose =
+                hal_quatf_normalize(hal_quatf_make(q[0], q[1], q[2],
+                                                   q[3]));
+        } else if (strcmp(key, "weights") == 0) {
+            hal_object *obj = hal_scene_object(scene, current);
+            if (!obj || !obj->mesh) {
+                set_err(err, err_cap,
+                        "line %d: 'weights' outside a mesh object",
+                        line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            hal_u32 nv = 0;
+            if (!parse_u32(&p, &nv) || !expect_end_of_line(&p) ||
+                nv != (hal_u32)obj->mesh->vert_count) {
+                set_err(err, err_cap,
+                        "line %d: weights wants the vert count", line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            consume_line(&p);
+            hal_f32 *w = calloc((size_t)nv * 4, sizeof(hal_f32));
+            hal_i32 *b = malloc((size_t)nv * 4 * sizeof(hal_i32));
+            if (!w || !b) {
+                free(w);
+                free(b);
+                set_err(err, err_cap, "out of memory");
+                result = HAL_ERR_OUT_OF_MEMORY;
+                free(key);
+                goto done;
+            }
+            bool w_ok = true;
+            for (hal_u32 v = 0; w_ok && v < nv; v++) {
+                skip_spaces(&p);
+                char *wkey = parse_word(&p);
+                if (!wkey || strcmp(wkey, "wv") != 0) {
+                    free(wkey);
+                    w_ok = false;
+                    break;
+                }
+                free(wkey);
+                for (size_t i = 0; w_ok && i < 4; i++) {
+                    hal_i32 bi;
+                    char *tok = parse_word(&p);
+                    if (!tok)
+                        w_ok = false;
+                    if (w_ok) {
+                        bi = (hal_i32)strtol(tok, NULL, 10);
+                        free(tok);
+                    } else {
+                        break;
+                    }
+                    hal_f32 wt;
+                    if (!parse_float(&p, &wt))
+                        w_ok = false;
+                    if (w_ok) {
+                        b[v * 4 + i] = bi;
+                        w[v * 4 + i] = wt;
+                    }
+                }
+                if (!expect_end_of_line(&p))
+                    w_ok = false;
+                consume_line(&p);
+            }
+            if (!w_ok) {
+                free(w);
+                free(b);
+                set_err(err, err_cap,
+                        "line %d: bad weights block", line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            free(obj->mesh->skin_weights);
+            free(obj->mesh->skin_bones);
+            obj->mesh->skin_weights = w;
+            obj->mesh->skin_bones = b;
         } else if (strcmp(key, "mesh") == 0 ||
                    strcmp(key, "v") == 0 || strcmp(key, "e") == 0 ||
                    strcmp(key, "f") == 0) {

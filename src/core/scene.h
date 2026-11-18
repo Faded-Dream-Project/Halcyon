@@ -18,6 +18,7 @@
 
 #include "../platform/types.h"
 #include "math.h"
+#include "armature.h"
 #include "material.h"
 #include "mesh.h"
 
@@ -46,6 +47,8 @@ typedef struct hal_object {
     char *name;              /* owned; never NULL                     */
     hal_object_type type;
     hal_mesh *mesh;          /* owned payload; NULL unless MESH       */
+    hal_armature *armature;  /* owned payload; NULL unless ARMATURE   */
+    hal_object_id skin_armature; /* armature object id, 0 = none       */
     int material;            /* scene material index, -1 = none       */
 
     /* Local transform (the glTF TRS triple). */
@@ -111,6 +114,14 @@ void hal_object_set_name(hal_scene *scene, hal_object_id id,
  * previous mesh, if any, is destroyed). NULL detaches. */
 void hal_object_set_mesh(hal_scene *scene, hal_object_id id,
                          hal_mesh *mesh);
+
+/* Attaches an armature to an ARMATURE object (same ownership rules). */
+void hal_object_set_armature(hal_scene *scene, hal_object_id id,
+                             hal_armature *armature);
+
+/* Points a mesh object's skin at an armature object (0 detaches). */
+void hal_object_set_skin(hal_scene *scene, hal_object_id mesh_obj,
+                         hal_object_id armature_obj);
 
 /* ---- Parenting ----
  * The parent must exist (or be HAL_OBJECT_ID_NONE). Reparenting to a

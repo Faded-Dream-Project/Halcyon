@@ -52,6 +52,11 @@ typedef struct hal_mesh {
     size_t uv_cap; /* private growth state                    */
     bool uvs_valid; /* set by an unwrap; cleared when loops are
                      * rebuilt from scratch                    */
+
+    /* Skin weights: 4 influences per vertex (bone index or -1 and a
+     * weight; unused slots carry -1 / 0). NULL until bound. */
+    hal_f32 *skin_weights;
+    hal_i32 *skin_bones;
     /* Edit-mode selection, one byte per element, grown with the
      * arrays (see mesh_ops.h). The capacities are private growth
      * state; readers use the counts above. */

@@ -4,6 +4,8 @@
 
 #include "scene.h"
 
+#include "armature.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -42,6 +44,7 @@ void hal_scene_destroy(hal_scene *scene) {
         return;
     for (size_t i = 0; i < scene->count; i++) {
         hal_mesh_destroy(scene->objects[i].mesh);
+        hal_armature_destroy(scene->objects[i].armature);
         free(scene->objects[i].name);
     }
     free(scene->objects);
@@ -95,6 +98,8 @@ hal_object_id hal_scene_object_add(hal_scene *scene, const char *name,
     slot->name = owned_name;
     slot->type = type;
     slot->mesh = NULL;
+    slot->armature = NULL;
+    slot->skin_armature = HAL_OBJECT_ID_NONE;
     slot->material = -1;
     slot->location = hal_vec3f_zero();
     slot->rotation = hal_quatf_identity();
@@ -130,6 +135,7 @@ void hal_scene_object_remove(hal_scene *scene, hal_object_id id) {
             scene->objects[i].parent = scene->objects[idx].parent;
 
     hal_mesh_destroy(scene->objects[idx].mesh);
+    hal_armature_destroy(scene->objects[idx].armature);
     free(scene->objects[idx].name);
     memmove(&scene->objects[idx], &scene->objects[idx + 1],
             (scene->count - idx - 1) * sizeof(hal_object));
@@ -181,6 +187,23 @@ void hal_object_set_mesh(hal_scene *scene, hal_object_id id,
         return;
     hal_mesh_destroy(obj->mesh);
     obj->mesh = mesh;
+}
+
+void hal_object_set_armature(hal_scene *scene, hal_object_id id,
+                             hal_armature *armature) {
+    hal_object *obj = hal_scene_object(scene, id);
+    if (!obj)
+        return;
+    hal_armature_destroy(obj->armature);
+    obj->armature = armature;
+}
+
+void hal_object_set_skin(hal_scene *scene, hal_object_id mesh_obj,
+                         hal_object_id armature_obj) {
+    hal_object *obj = hal_scene_object(scene, mesh_obj);
+    if (!obj)
+        return;
+    obj->skin_armature = armature_obj;
 }
 
 /* ---- Parenting ---- */

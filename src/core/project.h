@@ -28,7 +28,7 @@
 extern "C" {
 #endif
 
-#define HAL_PROJECT_FORMAT_VERSION 1
+#define HAL_PROJECT_FORMAT_VERSION 3
 
 /* Writes `scene` to `path` atomically. On failure, err (when non-NULL)
  * receives a human-readable reason (truncated to err_cap bytes).

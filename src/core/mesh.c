@@ -28,6 +28,8 @@ void hal_mesh_destroy(hal_mesh *mesh) {
     free(mesh->edge_sel);
     free(mesh->face_sel);
     free(mesh->uvs);
+    free(mesh->skin_weights);
+    free(mesh->skin_bones);
     free(mesh);
 }
 

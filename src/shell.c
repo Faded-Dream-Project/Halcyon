@@ -4,6 +4,7 @@
  */
 
 #include "shell.h"
+#include "core/armature.h"
 #include "core/material.h"
 #include "core/mesh.h"
 #include "core/mesh_ops.h"
@@ -74,6 +75,13 @@ struct hal_app {
     bool edit_mode;
     hal_object_id edit_obj;
     int sel_mode;
+
+    /* Pose mode (Tab on an armature): the selected bone drives R and
+     * IK. */
+    bool pose_mode;
+    hal_object_id pose_obj;
+    int bone_modal;         /* bone index during modal rotation */
+    hal_quatf bone_modal_orig;
 
     /* The move gizmo: axis under drag (-1 = none). */
     int gizmo_axis;
@@ -614,6 +622,13 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, edit, NULL, NULL, NULL, NULL);
     hal_menu_item_add(bar, edit, "Select All", "A", menu_action, app);
     hal_menu_item_add(bar, edit, "Deselect All", "Alt+A", menu_action, app);
+    hal_menu_item_add(bar, edit, NULL, NULL, NULL, NULL);
+    hal_menu_item_add(bar, edit, "Bind Mesh to Armature", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, edit, "Add Bone (child)", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, edit, "Solve IK (tip to mouse)", NULL,
+                      menu_action, app);
 
     int add = hal_menu_add(bar, "Add");
     hal_menu_item_add(bar, add, "Cube", NULL, menu_action, app);
@@ -622,6 +637,7 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, add, "Cylinder", NULL, menu_action, app);
     hal_menu_item_add(bar, add, "Cone", NULL, menu_action, app);
     hal_menu_item_add(bar, add, "Torus", NULL, menu_action, app);
+    hal_menu_item_add(bar, add, "Armature", NULL, menu_action, app);
     hal_menu_item_add(bar, add, "Light", NULL, menu_action, app);
 }
 
@@ -954,16 +970,146 @@ static void menu_action(hal_widget *menubar, int menu, int item,
                 hal_mesh_select_all(obj->mesh, false);
             break;
         }
+        case 28: {
+            /* Bind: the selected mesh skins to the selected
+             * armature. */
+            hal_object_id mesh_id = hal_scene_selected(app->scene);
+            hal_object *mesh_obj = hal_scene_object(app->scene, mesh_id);
+            hal_object_id arm_id = HAL_OBJECT_ID_NONE;
+            for (size_t i = 0; i < app->scene->count; i++)
+                if (app->scene->objects[i].armature &&
+                    app->scene->objects[i].id != mesh_id)
+                    arm_id = app->scene->objects[i].id;
+            hal_object *arm_obj = hal_scene_object(app->scene, arm_id);
+            if (!mesh_obj || !mesh_obj->mesh || !arm_obj ||
+                !arm_obj->armature) {
+                set_status(app, "Bind: select a mesh, have an armature");
+                break;
+            }
+            if (hal_mesh_bind_armature(mesh_obj->mesh,
+                                       arm_obj->armature)) {
+                hal_object_set_skin(app->scene, mesh_id, arm_id);
+                set_status(app, "Bound %s to %s", mesh_obj->name,
+                           arm_obj->name);
+                app->dirty = true;
+            }
+            break;
+        }
+        case 29: {
+            /* Add a child bone to the selected bone of the posed
+             * armature. */
+            hal_object *arm_obj =
+                hal_scene_object(app->scene, app->pose_obj);
+            if (!arm_obj || !arm_obj->armature) {
+                set_status(app, "Add Bone: enter pose mode (Tab) first");
+                break;
+            }
+            hal_armature *arm = arm_obj->armature;
+            int parent = -1;
+            for (size_t b = 0; b < arm->count; b++)
+                if (arm->bones[b].selected)
+                    parent = (int)b;
+            char name[64];
+            snprintf(name, sizeof(name), "Bone %zu", arm->count);
+            if (parent >= 0) {
+                hal_vec3f tail = arm->bones[parent].tail;
+                hal_vec3f dir = hal_vec3f_mul(
+                    hal_vec3f_normalize(hal_vec3f_sub(
+                        tail, arm->bones[parent].head)),
+                    hal_vec3f_distance(arm->bones[parent].head, tail));
+                hal_armature_bone_add(arm, name, tail,
+                                      hal_vec3f_add(tail, dir), parent);
+            } else {
+                hal_armature_bone_add(arm, name, hal_vec3f_zero(),
+                                      hal_vec3f_make(0, 1, 0), -1);
+            }
+            set_status(app, "Added %s", name);
+            app->dirty = true;
+            break;
+        }
+        case 30: {
+            /* IK: the selected bone (tip) solves toward the mouse
+             * ray at the tip's height plane. */
+            hal_object *arm_obj =
+                hal_scene_object(app->scene, app->pose_obj);
+            if (!arm_obj || !arm_obj->armature) {
+                set_status(app, "IK: enter pose mode (Tab) first");
+                break;
+            }
+            hal_armature *arm = arm_obj->armature;
+            int tip = -1;
+            for (size_t b = 0; b < arm->count; b++)
+                if (arm->bones[b].selected)
+                    tip = (int)b;
+            if (tip < 0 || arm->bones[tip].parent < 0) {
+                set_status(app, "IK: select a child bone");
+                break;
+            }
+            hal_rectf vp = hal_app_viewport_rect(app);
+            hal_size ws;
+            hal_window_get_size(app->window, &ws);
+            hal_mat4f view = hal_camera_view(&app->camera);
+            hal_mat4f proj = hal_camera_projection(
+                &app->camera, (hal_f32)ws.width / (hal_f32)ws.height);
+            hal_mat4f vpm = hal_mat4f_mul(proj, view);
+            hal_bone_pose *poses =
+                malloc(arm->count * sizeof(*poses));
+            if (!poses)
+                break;
+            hal_armature_pose(arm, poses);
+            hal_vec3f tip_world = hal_mat4f_transform_point(
+                hal_object_world_matrix(app->scene, arm_obj),
+                poses[tip].tail);
+            free(poses);
+            hal_ray ray = hal_camera_ray(&app->camera, vpm, vp,
+                                         app->last_pointer.x,
+                                         app->last_pointer.y);
+            /* Intersect the ray with the horizontal plane at the
+             * tip's height (simple, predictable). */
+            hal_f32 denom = ray.dir.y;
+            if (fabsf(denom) < 1e-6f) {
+                set_status(app, "IK: view too level for the target");
+                break;
+            }
+            hal_f32 t = (tip_world.y - ray.origin.y) / denom;
+            if (t <= 0.0f) {
+                set_status(app, "IK: target behind the camera");
+                break;
+            }
+            hal_vec3f target = hal_vec3f_add(
+                ray.origin, hal_vec3f_mul(ray.dir, t));
+            hal_mat4f world_inv = hal_mat4f_invert(
+                hal_object_world_matrix(app->scene, arm_obj));
+            hal_vec3f local =
+                hal_mat4f_transform_point(world_inv, target);
+            if (hal_armature_ik_2bone(arm, tip, local))
+                set_status(app, "IK solved");
+            else
+                set_status(app, "IK: chain not solvable");
+            app->dirty = true;
+            break;
+        }
         default:
             break;
         }
     } else if (menu == 2) { /* Add */
-        if (item <= 5)
+        if (item <= 5) {
             add_object(app, ADD_NAMES[item],
                        HAL_OBJECT_MESH, hal_vec3f_zero());
-        else if (item == 6)
+        } else if (item == 6) {
+            hal_object_id id = hal_scene_object_add(app->scene,
+                                                    "Armature",
+                                                    HAL_OBJECT_ARMATURE);
+            hal_object_set_armature(app->scene, id,
+                                    hal_armature_default());
+            hal_scene_select_only(app->scene, id);
+            app->dirty = true;
+            rebuild_outliner(app);
+            set_status(app, "Added Armature (Tab to pose)");
+        } else if (item == 7) {
             add_object(app, "Light", HAL_OBJECT_LIGHT,
                        hal_vec3f_make(2.0f, 3.0f, 2.0f));
+        }
     }
 }
 
@@ -1179,6 +1325,38 @@ static void edit_click(hal_app *app, hal_mat4f vpm, hal_rectf vp,
                hit);
 }
 
+/* Picks a bone of the posed armature by screen-space distance to the
+ * projected head-tail segment. Returns the bone index or -1. */
+static int pick_bone(hal_app *app, hal_object *arm_obj, hal_mat4f vpm,
+                     hal_rectf vp, hal_f32 px, hal_f32 py) {
+    hal_armature *arm = arm_obj->armature;
+    hal_bone_pose *poses = malloc(arm->count * sizeof(*poses));
+    if (!poses)
+        return -1;
+    hal_armature_pose(arm, poses);
+    hal_mat4f world = hal_object_world_matrix(app->scene, arm_obj);
+    hal_mat4f full = hal_mat4f_mul(vpm, world);
+    int best = -1;
+    hal_f32 best_d = 10.0f;
+    for (size_t b = 0; b < arm->count; b++) {
+        hal_f32 w0, w1;
+        hal_vec3f s0 = hal_camera_project(&app->camera, full,
+                                          poses[b].head, vp, &w0);
+        hal_vec3f s1 = hal_camera_project(&app->camera, full,
+                                          poses[b].tail, vp, &w1);
+        if (w0 > 0.0f && w1 > 0.0f) {
+            hal_f32 d = seg_dist((hal_vec2f){ s0.x, s0.y },
+                                 (hal_vec2f){ s1.x, s1.y }, px, py);
+            if (d < best_d) {
+                best_d = d;
+                best = (int)b;
+            }
+        }
+    }
+    free(poses);
+    return best;
+}
+
 bool hal_app_handle_event(hal_app *app, const hal_event *event) {
     if (!app)
         return false;
@@ -1219,6 +1397,39 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
     hal_mat4f vpm = hal_mat4f_mul(proj, view);
 
     /* --- Modal rotate/scale: drag drives, click confirms --- */
+    if (app->modal_op == 3) {
+        /* Bone rotation: about world Y, applied to the bone's pose. */
+        hal_object *arm_obj =
+            hal_scene_object(app->scene, app->pose_obj);
+        hal_armature *arm = arm_obj ? arm_obj->armature : NULL;
+        if (!arm || app->bone_modal < 0 ||
+            (size_t)app->bone_modal >= arm->count) {
+            app->modal_op = 0;
+            return true;
+        }
+        hal_bone *bone = &arm->bones[app->bone_modal];
+        if (event->type == HAL_EVENT_POINTER_MOTION) {
+            app->modal_amount += px - app->drag_last.x;
+            app->drag_last = (hal_pointf){ px, py };
+            bone->pose = hal_quatf_mul(
+                hal_quatf_from_axis_angle(
+                    hal_vec3f_axis_y(), app->modal_amount * 0.01f),
+                app->bone_modal_orig);
+            return true;
+        }
+        if (event->type == HAL_EVENT_POINTER_BUTTON_DOWN) {
+            app->modal_op = 0; /* accept (pose edits undo later) */
+            set_status(app, "Bone rotated");
+            return true;
+        }
+        if (event->type == HAL_EVENT_KEY_DOWN &&
+            event->key.scancode == HAL_KEY_ESC) {
+            bone->pose = app->bone_modal_orig;
+            app->modal_op = 0;
+            return true;
+        }
+        return true;
+    }
     if (app->modal_op != 0) {
         hal_object *obj =
             hal_scene_object(app->scene, hal_scene_selected(app->scene));
@@ -1372,6 +1583,20 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
                     return true;
                 }
             }
+            if (app->pose_mode) {
+                hal_object *arm_obj =
+                    hal_scene_object(app->scene, app->pose_obj);
+                if (arm_obj && arm_obj->armature) {
+                    int bone = pick_bone(app, arm_obj, vpm, vp, px, py);
+                    for (size_t b = 0; b < arm_obj->armature->count; b++)
+                        arm_obj->armature->bones[b].selected =
+                            (int)b == bone;
+                    if (bone >= 0)
+                        set_status(app, "Bone: %s",
+                                   arm_obj->armature->bones[bone].name);
+                }
+                return true;
+            }
             if (app->edit_mode) {
                 edit_click(app, vpm, vp, px, py,
                            (mods & HAL_MOD_SHIFT) != 0);
@@ -1464,7 +1689,23 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
 
         /* Plain keys (hal_scancode is unsigned; compare likewise). */
         hal_u32 key_plain = key;
-        if (key_plain == 15) { /* Tab: toggle edit mode */
+        if (key_plain == 15) { /* Tab: edit / pose mode */
+            if (app->pose_mode) {
+                app->pose_mode = false;
+                set_status(app, "Object mode");
+                return true;
+            }
+            hal_object *sel0 =
+                hal_scene_object(app->scene,
+                                 hal_scene_selected(app->scene));
+            if (sel0 && sel0->armature) {
+                app->pose_mode = true;
+                app->pose_obj = sel0->id;
+                app->edit_mode = false;
+                set_status(app, "Pose mode: %s (click bones, R, IK)",
+                           sel0->name);
+                return true;
+            }
             if (app->edit_mode) {
                 hal_object *obj =
                     hal_scene_object(app->scene, app->edit_obj);
@@ -1485,7 +1726,25 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
             }
             return true;
         }
-        if (!app->edit_mode) {
+        if (app->pose_mode && key_plain == 19) { /* R: bone rotate */
+            hal_object *arm_obj =
+                hal_scene_object(app->scene, app->pose_obj);
+            int bone = -1;
+            if (arm_obj && arm_obj->armature)
+                for (size_t b = 0; b < arm_obj->armature->count; b++)
+                    if (arm_obj->armature->bones[b].selected)
+                        bone = (int)b;
+            if (bone >= 0) {
+                app->bone_modal = bone;
+                app->bone_modal_orig = arm_obj->armature->bones[bone].pose;
+                app->modal_op = 3; /* bone rotate */
+                app->modal_amount = 0.0f;
+                app->drag_last = app->last_pointer;
+                set_status(app, "Rotate bone: move, click to accept");
+            }
+            return true;
+        }
+        if (!app->edit_mode && !app->pose_mode) {
             hal_object *sel =
                 hal_scene_object(app->scene,
                                  hal_scene_selected(app->scene));
