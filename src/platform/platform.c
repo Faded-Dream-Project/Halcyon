@@ -522,6 +522,91 @@ hal_result hal_surface_draw_text(hal_surface *surface, hal_font *font,
         hal_color_to_fdk(color)));
 }
 
+/* ---- File dialogs ---- */
+
+static void hal_dialog_bridge(const fdk_file_dialog_result *result,
+                              void *user_data);
+
+typedef struct hal_dialog_req {
+    hal_dialog_done_fn on_done;
+    void *user_data;
+} hal_dialog_req;
+
+static void hal_dialog_bridge(const fdk_file_dialog_result *result,
+                              void *user_data) {
+    hal_dialog_req *req = user_data;
+    char *path = NULL;
+    if (result->outcome == FDK_FILE_DIALOG_ACCEPTED && result->count > 0 &&
+        result->paths[0]) {
+        size_t n = strlen(result->paths[0]) + 1;
+        path = malloc(n);
+        if (path)
+            memcpy(path, result->paths[0], n);
+    }
+    req->on_done(path, req->user_data);
+    free(req);
+}
+
+static hal_result dialog_show(hal_platform *platform, fdk_window *parent,
+                              const char *title, const char *filters,
+                              hal_dialog_done_fn on_done, void *user_data,
+                              bool save, const char *start_name) {
+    if (!platform || !on_done)
+        return HAL_ERR_INVALID_ARGUMENT;
+
+    hal_dialog_req *req = malloc(sizeof(*req));
+    if (!req)
+        return HAL_ERR_OUT_OF_MEMORY;
+    req->on_done = on_done;
+    req->user_data = user_data;
+
+    fdk_file_dialog_options opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.title = title;
+    opts.kind = save ? FDK_FILE_DIALOG_SAVE_FILE : FDK_FILE_DIALOG_OPEN_FILE;
+    opts.filters = filters;
+    opts.start_name = start_name;
+    opts.parent = parent;
+
+    fdk_result r = fdk_dialog_open_file(platform->fdk, &opts,
+                                        hal_dialog_bridge, req, NULL);
+    if (!fdk_ok(r)) {
+        free(req);
+        return hal_result_from_fdk(r);
+    }
+    return HAL_OK;
+}
+
+hal_result hal_dialog_open_file(hal_platform *platform, const char *title,
+                                const char *filters,
+                                hal_dialog_done_fn on_done, void *user_data,
+                                hal_window *parent) {
+    return dialog_show(platform, parent ? parent->fdk : NULL, title, filters,
+                       on_done, user_data, false, NULL);
+}
+
+hal_result hal_dialog_save_file(hal_platform *platform, const char *title,
+                                const char *filters,
+                                const char *start_name,
+                                hal_dialog_done_fn on_done, void *user_data,
+                                hal_window *parent) {
+    return dialog_show(platform, parent ? parent->fdk : NULL, title, filters,
+                       on_done, user_data, true, start_name);
+}
+
+hal_result hal_dialog_message(hal_platform *platform, hal_window *parent,
+                              const char *title, const char *text) {
+    if (!platform)
+        return HAL_ERR_INVALID_ARGUMENT;
+    fdk_dialog_options opts;
+    memset(&opts, 0, sizeof(opts));
+    opts.title = title;
+    opts.text = text;
+    opts.parent = parent ? parent->fdk : NULL;
+    fdk_dialog_show_message(platform->fdk, &opts, NULL, NULL, NULL);
+    return HAL_OK;
+}
+
 /* ---- Clipboard ---- */
 
 hal_result hal_clipboard_set_text(hal_platform *platform, const char *text) {

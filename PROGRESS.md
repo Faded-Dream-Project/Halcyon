@@ -44,7 +44,7 @@
 
 ## Current state
 
-**M0 and M1 complete** (2026-11-18). Milestones M2–M11: not started.
+**M0, M1 and M2 complete** (2026-11-18). Milestones M3–M11: not started.
 
 ### Implemented and tested
 
@@ -115,15 +115,72 @@
   scheduled writes through the atomic project save, retry-on-failure
   without busy-looping, crash-recovery detection by mtime comparison.
 
+### Implemented and tested — M2: own UI system (2026-11-18)
+
+- **2D painter** (`src/ui/canvas.h/c`): rect fills with outward
+  rounding at HiDPI scale, antialiased rounded rects (rounded-box SDF,
+  interior byte-identical to crisp fills, 1px fringe), rect outlines,
+  Xiaolin-Wu AA lines, AA circles, AA triangles (barycentric coverage),
+  text through the platform's exposed rasterizer, an intersecting clip
+  stack (clamped in float space — no integer overflow), logical ->
+  physical scaling so the UI never sees the HiDPI factor.
+- **Theme system** (`src/ui/theme.h/c` + docs/themes.md): 17 color
+  tokens + 5 metrics, the built-in "Faded Dream" face (deep blues,
+  soft purples), strict fail-closed `.haltheme` parser with
+  line-numbered errors, partial themes inherit the default, save/load
+  round-trip tested.
+- **Widget toolkit** (`src/ui/`): retained widget tree with labels,
+  buttons, toggles, sliders, single-line entries (UTF-8 caret
+  navigation, backspace/delete/insert), panels with title bands,
+  rows/columns with expand, tabs, tree views (expander triangles,
+  selection, callbacks) and menu bars with in-window overlay menus
+  (decision D-008 — no OS popups). Public API in `src/ui/ui.h`;
+  internals split across widget/layout/paint/input/menu/tree/controls
+  sources.
+- **Layout engine**: bottom-up measure, top-down arrange, absolute
+  rect walk; text measured through a per-UI font cache keyed by
+  (logical px, scale).
+- **Input routing** (`src/ui/input.c`): hit testing (paint order ==
+  hit order), hover tracking, press/release with release-position
+  activation, the implicit grab (slider drags survive leaving the
+  widget), keyboard focus cycling (Tab/Shift-Tab), entry editing,
+  menu open/switch/activate/close semantics (outside click consumed,
+  Escape closes). Fully headless-testable — the tests feed synthetic
+  events.
+- **Editor shell** (`src/shell.h/c`): the M2 application — menu bar
+  (File/Edit/Add with working actions), outliner bound to the scene
+  graph (selection sync), properties panel (name + location editing
+  through the M1 undo stack), status bar, the viewport rect reserved
+  for M3 with a placeholder grid. Project new/open/save/save-as
+  through the platform's file dialogs; Ctrl+N/O/S/Z/Y and
+  Ctrl+Shift+Z shortcuts; autosave driven from the frame loop.
+- **Platform additions**: file dialogs (open/save, async callbacks,
+  bridge-owned paths), message dialogs.
+- Tests: test_ui (152 checks — canvas fills/clips/scaling/AA
+  coverage, theme round trip + strict-parser failures, row/column
+  layout with expand, panel nesting, button/toggle/slider/entry/tree/
+  menu interaction through synthetic events). The display-tier smoke
+  test now paints the full editor shell; the frame was verified
+  pixel-wise (menubar/sidebar/viewport regions, grid lines, placeholder
+  text ink).
+
 ### Not implemented (honest list)
 
-- Everything M2–M11: the widget/UI system, the 3D viewport, modeling
-  (meshes are not yet representable in the project file — format
-  version 1 has objects and transforms only), materials/UVs, rigging,
-  animation, import/export, game-asset workflow, preview rendering,
-  shortcuts/preferences/example projects.
-- The M1 core is not yet wired into the application (main.c still runs
-  the M0 placeholder scene); it lands behind the M2 UI's editor shell.
+- Everything M3–M11: the 3D viewport (M3 — the reserved rect shows a
+  placeholder grid), modeling (meshes are not yet representable in the
+  project file — format version 1 has objects and transforms only),
+  materials/UVs, rigging, animation, import/export, game-asset
+  workflow, preview rendering, preferences/example projects.
+- Widget gaps (honest): no scrolling containers (long outliners clip),
+  no multi-line text editor, no tooltips, no DPI-change re-layout
+  while running (re-layout happens on resize events), no IME
+  forwarding into entries yet (the platform exposes the events; the
+  entry consumes raw codepoints only), no side-of-window panel
+  dragging (docking-lite is fixed panels with splitters planned for
+  M3+).
+- Menus cannot extend past the window (in-window overlays by design).
+- Touch/tablet/gesture events not yet routed (platform delivers them;
+  no consumer yet).
 - Touch, tablet, gesture and drag-and-drop events are not yet
   forwarded from the platform (the FDK side delivers them; Halcyon
   will map them when a feature needs them).
@@ -134,6 +191,14 @@
 
 ## Log
 
+- **2026-11-18 — M2 complete.** Halcyon's own UI toolkit: painter,
+  themes, widgets, layout, input routing, the editor shell wiring the
+  M1 core (scene outliner, undoable property editing, project
+  open/save, autosave). 582 headless checks total (152 new). Tests
+  caught five real bugs: a clip-stack integer overflow (UBSan), layout
+  order (absolute rects computed before arrange), release-position
+  activation, menu-bar item geometry computed before absolute rects
+  existed, and a tree-row leak (ASan).
 - **2026-11-18 — M1 complete.** Math library, scene graph, undo/redo,
   .halcyon project format (documented, atomic, strict), autosave with
   crash-recovery detection. 278 headless checks across five suites

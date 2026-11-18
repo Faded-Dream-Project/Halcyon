@@ -1,113 +1,66 @@
 /*
  * main.c — Halcyon application entry
  *
- * M0 scope: open the window through the platform module, run the frame
- * loop (pump -> decide -> draw -> present), paint the milestone
- * placeholder (a calm dreamy gradient plus the Halcyon wordmark), and
- * shut down cleanly. The real editor UI (src/ui/) replaces this
- * placeholder scene as M2 lands.
+ * Owns the frame loop (decision D-004): pump events, paint when there
+ * is something to paint, present. The editor shell (src/shell.c) holds
+ * the UI, the scene and the project state.
  *
- * --smoke: automated window test. Opens the window, acquires the
- * framebuffer, draws one frame, presents it, and verifies the window
- * size matches the surface it drew into. Exits 0 on success, 1 on
- * timeout. A CONFIGURE event is recorded but not required: on a WM-less
- * X server (Xvfb) a window maps at its creation size and no configure
- * is generated — present-success plus size agreement is the honest,
- * backend-neutral criterion. Used by `make test-display` and CI.
+ * --smoke: automated window test — opens, paints one frame, presents,
+ * verifies geometry, exits 0 (1 on timeout). --screenshot <path>
+ * saves the presented frame as PNG (used by the display tier and by
+ * visual verification during development).
  */
 
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "platform/platform.h"
+#include "shell.h"
 
-typedef struct app_state {
+typedef struct app_frame {
     hal_platform *platform;
     hal_window *window;
     hal_surface *surface;
-    hal_font *font;
+    hal_app *app;
     bool running;
     bool need_redraw;
-    bool got_configure;
     bool presented_once;
-    hal_size window_size;
-    hal_f32 scale;
-} app_state;
+    double last_autosave_tick;
+} app_frame;
 
 static void on_event(hal_window *window, const hal_event *event,
                      void *user_data) {
-    app_state *app = user_data;
+    app_frame *frame = user_data;
 
     switch (event->type) {
-    case HAL_EVENT_WINDOW_CONFIGURE:
-        app->window_size = event->configure.size;
-        app->got_configure = true;
-        app->need_redraw = true; /* a resize invalidates the frame */
-        break;
     case HAL_EVENT_WINDOW_CLOSE_REQUEST:
-        app->running = false;
+        hal_app_quit(frame->app);
         break;
+    case HAL_EVENT_WINDOW_CONFIGURE:
     case HAL_EVENT_WINDOW_EXPOSE:
-        app->need_redraw = true;
-        break;
     case HAL_EVENT_WINDOW_FOCUS:
-        app->need_redraw = true; /* the title bar hint may change */
-        break;
-    case HAL_EVENT_KEY_DOWN:
-        if (event->key.scancode == HAL_KEY_ESC)
-            app->running = false;
+        frame->need_redraw = true;
         break;
     default:
         break;
     }
+
+    /* Everything else flows through the shell (UI first, then
+     * app-level shortcuts). Events that change UI state mark the UI
+     * dirty; the loop checks both flags. */
+    hal_app_handle_event(frame->app, event);
+    if (hal_ui_needs_paint(hal_app_ui(frame->app)))
+        frame->need_redraw = true;
     (void)window;
 }
 
-/* The M0 placeholder scene: a vertical dusk gradient (deep blue at the
- * bottom fading to soft violet at the top — the Faded Dream palette)
- * and the wordmark. Drawn with raw pixels through the surface info; the
- * real painter arrives with M2. */
-static void draw_placeholder(app_state *app) {
-    hal_surface_info info;
-    if (!hal_ok(hal_surface_info_get(app->surface, &info)))
-        return;
-
-    const hal_f32 w = (hal_f32)info.width;
-    for (hal_i32 y = 0; y < info.height; y++) {
-        hal_f32 t = (hal_f32)y / (hal_f32)(info.height > 1 ? info.height - 1
-                                                           : 1);
-        /* top: soft violet #8b7ec8 -> bottom: deep dream blue #141a3c */
-        hal_f32 r = 0x8b / 255.0f + t * (0x14 / 255.0f - 0x8b / 255.0f);
-        hal_f32 g = 0x7e / 255.0f + t * (0x1a / 255.0f - 0x7e / 255.0f);
-        hal_f32 b = 0xc8 / 255.0f + t * (0x3c / 255.0f - 0xc8 / 255.0f);
-        hal_u32 packed = ((hal_u32)(r * 255.0f + 0.5f) << 16) |
-                         ((hal_u32)(g * 255.0f + 0.5f) << 8) |
-                         (hal_u32)(b * 255.0f + 0.5f);
-        for (hal_i32 x = 0; x < info.width; x++)
-            info.pixels[(size_t)y * (size_t)info.stride + (size_t)x] = packed;
-    }
-
-    if (app->font && w > 1.0f) {
-        static const char title[] = "halcyon";
-        static const char sub[] =
-            "M0 \xe2\x80\x94 platform foundation \xc2\xb7 part of the "
-            "Faded Dream Project";
-        hal_text_metrics tm, ts;
-        hal_font_measure(app->font, title, sizeof(title) - 1, &tm);
-        hal_font_measure(app->font, sub, sizeof(sub) - 1, &ts);
-        hal_i32 cx = (hal_i32)(w * 0.5f);
-        hal_i32 mid_y = info.height / 2;
-        hal_surface_draw_text(app->surface, app->font, title,
-                              sizeof(title) - 1, cx - tm.advance_width / 2,
-                              mid_y - 10, hal_color_hex(0xf2eefc), NULL);
-        hal_surface_draw_text(app->surface, app->font, sub, sizeof(sub) - 1,
-                              cx - ts.advance_width / 2, mid_y + 24,
-                              hal_color_rgba8(0xf2, 0xee, 0xfc, 200), NULL);
-    }
-
-    hal_surface_invalidate_all(app->surface);
+static double now_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
 int main(int argc, char **argv) {
@@ -120,18 +73,14 @@ int main(int argc, char **argv) {
             screenshot = argv[++i];
     }
 
-    app_state app;
-    memset(&app, 0, sizeof(app));
-    app.running = true;
-    app.need_redraw = true;
-    app.window_size.width = 1280;
-    app.window_size.height = 800;
-    app.scale = 1.0f;
+    app_frame frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.running = true;
+    frame.need_redraw = true;
 
     hal_platform_options opts = { .app_id = "org.faded-dream.halcyon" };
-    hal_result r = hal_platform_init(&opts, &app.platform);
-    if (!hal_ok(r)) {
-        fprintf(stderr, "halcyon: platform init failed (%d)\n", (int)r);
+    if (!hal_ok(hal_platform_init(&opts, &frame.platform))) {
+        fprintf(stderr, "halcyon: platform init failed\n");
         return 1;
     }
 
@@ -140,86 +89,88 @@ int main(int argc, char **argv) {
         .width = 1280,
         .height = 800,
     };
-    r = hal_window_create(app.platform, &wopts, &app.window);
-    if (!hal_ok(r)) {
-        fprintf(stderr, "halcyon: window create failed (%d)\n", (int)r);
-        hal_platform_shutdown(app.platform);
+    if (!hal_ok(hal_window_create(frame.platform, &wopts, &frame.window))) {
+        fprintf(stderr, "halcyon: window create failed\n");
+        hal_platform_shutdown(frame.platform);
+        return 1;
+    }
+    if (!hal_ok(hal_window_get_surface(frame.window, &frame.surface))) {
+        fprintf(stderr, "halcyon: surface acquire failed\n");
+        hal_window_destroy(frame.window);
+        hal_platform_shutdown(frame.platform);
         return 1;
     }
 
-    hal_window_set_event_callback(app.window, on_event, &app);
-    r = hal_window_get_surface(app.window, &app.surface);
-    if (!hal_ok(r)) {
-        fprintf(stderr, "halcyon: surface acquire failed (%d)\n", (int)r);
-        hal_window_destroy(app.window);
-        hal_platform_shutdown(app.platform);
+    frame.app = hal_app_create(frame.platform, frame.window);
+    if (!frame.app) {
+        fprintf(stderr, "halcyon: editor shell init failed\n");
+        hal_window_destroy(frame.window);
+        hal_platform_shutdown(frame.platform);
         return 1;
     }
 
-    app.font = hal_font_system_default(18);
-    hal_window_show(app.window);
+    hal_window_set_event_callback(frame.window, on_event, &frame);
+    hal_window_show(frame.window);
 
-    /* The frame loop: pump input, draw when there is a frame to draw,
-     * present. 15 ms of patience keeps the CPU idle when nothing
-     * changes; the whole UI redraws on demand (need_redraw). */
     const int smoke_timeout_ms = 10000;
-    int waited = 0;
-    while (app.running) {
-        int n = hal_platform_pump(app.platform, 15);
+    int waited_ms = 0;
+    while (hal_app_running(frame.app)) {
+        int n = hal_platform_pump(frame.platform, 15);
         if (n < 0) {
-            fprintf(stderr, "halcyon: platform connection lost (%d)\n", n);
+            fprintf(stderr, "halcyon: platform connection lost\n");
             break;
         }
-        if (smoke)
-            waited += 15;
 
-        if (app.need_redraw && hal_surface_frame_ready(app.surface)) {
-            draw_placeholder(&app);
-            if (hal_ok(hal_surface_present(app.surface)))
-                app.presented_once = true;
-            app.need_redraw = false;
+        /* Autosave rides the frame loop's clock. */
+        double now = now_seconds();
+        if (now - frame.last_autosave_tick > 1.0) {
+            frame.last_autosave_tick = now;
+            hal_autosave_tick(hal_app_autosave(frame.app),
+                              hal_app_scene(frame.app), now);
+        }
+
+        if (frame.need_redraw || hal_ui_needs_paint(hal_app_ui(frame.app))) {
+            if (hal_surface_frame_ready(frame.surface)) {
+                hal_app_paint(frame.app, frame.surface);
+                frame.presented_once = true;
+                frame.need_redraw = false;
+            }
         }
 
         if (smoke) {
+            waited_ms += 15;
             hal_size size_now = { 0, 0 };
-            hal_surface_info info_now;
-            bool size_ok = hal_ok(hal_window_get_size(app.window, &size_now)) &&
-                           hal_ok(hal_surface_info_get(app.surface,
-                                                       &info_now)) &&
-                           size_now.width == info_now.width &&
-                           size_now.height == info_now.height &&
-                           size_now.width > 0;
-            if (app.presented_once && size_ok) {
-                printf("smoke: %dx%d surface drawn and presented, "
-                       "configure=%d, scale=%.2f\n",
-                       size_now.width, size_now.height,
-                       (int)app.got_configure, app.scale);
+            bool size_ok =
+                hal_ok(hal_window_get_size(frame.window, &size_now)) &&
+                size_now.width > 0;
+            if (frame.presented_once && size_ok) {
+                hal_rectf vp = hal_app_viewport_rect(frame.app);
+                printf("smoke: %dx%d window painted and presented; "
+                       "viewport %.0fx%.0f\n",
+                       size_now.width, size_now.height, vp.width,
+                       vp.height);
                 if (screenshot) {
-                    hal_result ps = hal_surface_save_png(app.surface,
-                                                         screenshot);
-                    if (hal_ok(ps))
-                        printf("smoke: screenshot saved to %s\n", screenshot);
+                    if (hal_ok(hal_surface_save_png(frame.surface,
+                                                    screenshot)))
+                        printf("smoke: screenshot saved to %s\n",
+                               screenshot);
                     else
-                        fprintf(stderr, "smoke: screenshot failed (%d)\n",
-                                (int)ps);
+                        fprintf(stderr, "smoke: screenshot failed\n");
                 }
-                app.running = false;
-            } else if (waited >= smoke_timeout_ms) {
-                fprintf(stderr,
-                        "smoke: FAILED (presented=%d size_ok=%d "
-                        "configure=%d)\n",
-                        (int)app.presented_once, (int)size_ok,
-                        (int)app.got_configure);
-                hal_font_destroy(app.font);
-                hal_window_destroy(app.window);
-                hal_platform_shutdown(app.platform);
+                hal_app_quit(frame.app);
+            } else if (waited_ms >= smoke_timeout_ms) {
+                fprintf(stderr, "smoke: FAILED (presented=%d size_ok=%d)\n",
+                        (int)frame.presented_once, (int)size_ok);
+                hal_app_destroy(frame.app);
+                hal_window_destroy(frame.window);
+                hal_platform_shutdown(frame.platform);
                 return 1;
             }
         }
     }
 
-    hal_font_destroy(app.font);
-    hal_window_destroy(app.window);
-    hal_platform_shutdown(app.platform);
+    hal_app_destroy(frame.app);
+    hal_window_destroy(frame.window);
+    hal_platform_shutdown(frame.platform);
     return 0;
 }

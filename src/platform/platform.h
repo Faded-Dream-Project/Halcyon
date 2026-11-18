@@ -336,6 +336,32 @@ hal_result hal_surface_draw_text(hal_surface *surface, hal_font *font,
                                  hal_i32 pen_x, hal_i32 baseline_y,
                                  hal_color color, const hal_rect *clip);
 
+/* ---- File dialogs (asynchronous, toolkit-owned windows) ---- */
+
+/* Called once when the dialog closes: `path` is the chosen path (a
+ * malloc'd copy the callback OWNS and must free) or NULL when the
+ * dialog was cancelled. */
+typedef void (*hal_dialog_done_fn)(char *path, void *user_data);
+
+/* Shows an open-file dialog. `filters` is a "; "-free glob list like
+ * "*.halcyon" (may be NULL for all files). */
+hal_result hal_dialog_open_file(hal_platform *platform, const char *title,
+                                const char *filters,
+                                hal_dialog_done_fn on_done, void *user_data,
+                                hal_window *parent);
+
+/* Shows a save-file dialog (with overwrite confirmation where the
+ * platform provides one). */
+hal_result hal_dialog_save_file(hal_platform *platform, const char *title,
+                                const char *filters,
+                                const char *start_name,
+                                hal_dialog_done_fn on_done, void *user_data,
+                                hal_window *parent);
+
+/* A modal information dialog. */
+hal_result hal_dialog_message(hal_platform *platform, hal_window *parent,
+                              const char *title, const char *text);
+
 /* ---- Clipboard (text) ---- */
 
 hal_result hal_clipboard_set_text(hal_platform *platform, const char *text);

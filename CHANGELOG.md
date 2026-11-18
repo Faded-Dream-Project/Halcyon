@@ -6,6 +6,23 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — M2: own UI system (2026-11-18)
+
+- Own 2D painter (canvas): AA rounded rects, lines, circles,
+  triangles, clip stack, HiDPI-aware logical coordinates.
+- Theme system: `.haltheme` strict parser, the Faded Dream default
+  palette, save/load round trips (docs/themes.md).
+- Widget toolkit: labels, buttons, toggles, sliders, entries,
+  panels, rows/columns, tabs, tree views, menu bars with overlay
+  menus; measure/arrange layout engine; headless input routing
+  (hover, press, grab, focus, menu semantics).
+- Editor shell: menus, outliner (scene-bound), properties panel
+  (undoable edits), status bar, viewport rect reserved for M3;
+  project new/open/save/save-as + shortcuts; autosave driven from
+  the frame loop.
+- Platform: file/message dialog wrappers.
+- Tests: test_ui — 152 checks, all headless.
+
 ### Added — M1: core (2026-11-18)
 
 - Math library: f32 vec2/3/4, column-major mat4, unit quaternions —
