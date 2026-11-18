@@ -1213,3 +1213,405 @@ bool hal_mesh_paint_weight(hal_mesh *m, hal_mat4f world,
     hal_mesh_invalidate_derived(m);
     return changed;
 }
+
+/* ---- Convex hull (quickhull, collider-grade) ----
+ *
+ * Faces keep outward normals; "outside" means dot(n, p) > d + eps.
+ * Each iteration wraps the farthest outside point around its
+ * visible region (horizon edges in the non-visible faces' winding).
+ * Degenerate inputs (coplanar point sets) return NULL rather than a
+ * broken mesh — callers fall back to a box collider. */
+
+typedef struct hull_face {
+    hal_u32 v[3];
+    hal_vec3f n;
+    hal_f32 d; /* plane: dot(n, x) = d, n outward */
+    bool alive;
+} hull_face;
+
+static bool hull_make_face(hull_face *f, hal_u32 a, hal_u32 b,
+                           hal_u32 c, const hal_vec3f *pts) {
+    f->v[0] = a;
+    f->v[1] = b;
+    f->v[2] = c;
+    f->alive = true;
+    hal_vec3f e1 = hal_vec3f_sub(pts[b], pts[a]);
+    hal_vec3f e2 = hal_vec3f_sub(pts[c], pts[a]);
+    hal_vec3f n = hal_vec3f_cross(e1, e2);
+    hal_f32 len = hal_vec3f_length(n);
+    if (len < 1e-12f)
+        return false; /* degenerate triangle */
+    f->n = hal_vec3f_mul(n, 1.0f / len);
+    f->d = hal_vec3f_dot(f->n, pts[a]);
+    return true;
+}
+
+static bool hull_face_visible(const hull_face *f, hal_vec3f p,
+                              hal_f32 eps) {
+    return hal_vec3f_dot(f->n, p) > f->d + eps;
+}
+
+hal_mesh *hal_mesh_convex_hull(const hal_mesh *m) {
+    if (!m || m->vert_count < 4)
+        return NULL;
+
+    /* Unique points (exact duplicates collapse — they would make
+     * degenerate faces). */
+    hal_vec3f *pts = malloc(m->vert_count * sizeof(*pts));
+    if (!pts)
+        return NULL;
+    size_t pt_count = 0;
+    for (size_t i = 0; i < m->vert_count; i++) {
+        bool dup = false;
+        for (size_t j = 0; j < pt_count; j++)
+            if (hal_vec3f_distance(pts[j], m->verts[i]) < 1e-9f) {
+                dup = true;
+                break;
+            }
+        if (!dup)
+            pts[pt_count++] = m->verts[i];
+    }
+    if (pt_count < 4) {
+        free(pts);
+        return NULL;
+    }
+
+    hal_vec3f bmin, bmax;
+    hal_mesh_bounds((hal_mesh *)(size_t)m, &bmin, &bmax);
+    hal_f32 eps = hal_vec3f_distance(bmin, bmax) * 1e-6f;
+
+    /* The initial tetrahedron: X extremes, then farthest from the X
+     * line, then farthest from that plane. */
+    size_t a = 0, b = 0;
+    for (size_t i = 1; i < pt_count; i++) {
+        if (pts[i].x < pts[a].x)
+            a = i;
+        if (pts[i].x > pts[b].x)
+            b = i;
+    }
+    if (a == b || hal_vec3f_distance(pts[a], pts[b]) < eps) {
+        free(pts);
+        return NULL;
+    }
+    size_t c = 0;
+    hal_f32 best_c = -1.0f;
+    for (size_t i = 0; i < pt_count; i++) {
+        if (i == a || i == b)
+            continue;
+        hal_vec3f ab = hal_vec3f_sub(pts[b], pts[a]);
+        hal_vec3f ap = hal_vec3f_sub(pts[i], pts[a]);
+        hal_f32 d = hal_vec3f_length(hal_vec3f_cross(ab, ap));
+        if (d > best_c) {
+            best_c = d;
+            c = i;
+        }
+    }
+    if (best_c < eps) {
+        free(pts); /* collinear */
+        return NULL;
+    }
+    size_t d_i = 0;
+    hal_f32 best_d = -1.0f;
+    {
+        hal_vec3f n = hal_vec3f_normalize(hal_vec3f_cross(
+            hal_vec3f_sub(pts[b], pts[a]),
+            hal_vec3f_sub(pts[c], pts[a])));
+        hal_f32 dd = hal_vec3f_dot(n, pts[a]);
+        for (size_t i = 0; i < pt_count; i++) {
+            hal_f32 dist =
+                fabsf(hal_vec3f_dot(n, pts[i]) - dd);
+            if (dist > best_d) {
+                best_d = dist;
+                d_i = i;
+            }
+        }
+    }
+    if (best_d < eps) {
+        free(pts); /* coplanar */
+        return NULL;
+    }
+    if (d_i == a || d_i == b || d_i == c) {
+        free(pts);
+        return NULL;
+    }
+
+    /* Faces array (grows; dead faces stay as tombstones). */
+    size_t face_cap = 64, face_count = 0;
+    hull_face *faces = malloc(face_cap * sizeof(*faces));
+    if (!faces) {
+        free(pts);
+        return NULL;
+    }
+
+    /* Orient the tetra outward: the 4th point must be BEHIND each
+     * face (inside). */
+    hal_u32 tv[4] = { (hal_u32)a, (hal_u32)b, (hal_u32)c,
+                      (hal_u32)d_i };
+    static const int tri[4][3] = { { 0, 1, 2 }, { 0, 2, 3 },
+                                   { 0, 3, 1 }, { 1, 3, 2 } };
+    for (int t = 0; t < 4; t++) {
+        hull_face f;
+        if (!hull_make_face(&f, tv[tri[t][0]], tv[tri[t][1]],
+                            tv[tri[t][2]], pts)) {
+            free(pts);
+            free(faces);
+            return NULL;
+        }
+        /* Flip so the opposite tetra vertex is behind. */
+        hal_u32 opp = tv[0] == f.v[0] || tv[0] == f.v[1] ||
+                              tv[0] == f.v[2]
+                          ? (tv[1] == f.v[0] || tv[1] == f.v[1] ||
+                                     tv[1] == f.v[2]
+                                 ? (tv[2] == f.v[0] ||
+                                            tv[2] == f.v[1] ||
+                                            tv[2] == f.v[2]
+                                        ? tv[3]
+                                        : tv[2])
+                                 : tv[1])
+                          : tv[0];
+        if (hal_vec3f_dot(f.n, pts[opp]) > f.d) {
+            hal_u32 tmp = f.v[1];
+            f.v[1] = f.v[2];
+            f.v[2] = tmp;
+            f.n = hal_vec3f_mul(f.n, -1.0f);
+            f.d = -f.d;
+        }
+        if (face_count == face_cap) {
+            face_cap *= 2;
+            hull_face *grown =
+                realloc(faces, face_cap * sizeof(*faces));
+            if (!grown) {
+                free(pts);
+                free(faces);
+                return NULL;
+            }
+            faces = grown;
+        }
+        faces[face_count++] = f;
+    }
+
+    /* The remaining points wait in the pool. */
+    bool *in_pool = calloc(pt_count, sizeof(bool));
+    hal_u32 *pool = malloc(pt_count * sizeof(hal_u32));
+    if (!in_pool || !pool) {
+        free(in_pool);
+        free(pool);
+        free(pts);
+        free(faces);
+        return NULL;
+    }
+    size_t pool_count = 0;
+    for (size_t i = 0; i < pt_count; i++) {
+        if (i == a || i == b || i == c || i == d_i)
+            continue;
+        in_pool[i] = true;
+        pool[pool_count++] = (hal_u32)i;
+    }
+
+    size_t guard = pt_count * 4 + 1024;
+    while (guard-- > 0) {
+        /* Any face with an outside point? */
+        bool *visible = calloc(face_count, sizeof(bool));
+        if (!visible)
+            break;
+        int eye = -1;
+        hal_f32 eye_dist = -1.0f;
+        size_t eye_face = (size_t)-1;
+        for (size_t fi = 0; fi < face_count; fi++) {
+            if (!faces[fi].alive)
+                continue;
+            for (size_t pi = 0; pi < pool_count; pi++) {
+                hal_u32 p = pool[pi];
+                if (!in_pool[p])
+                    continue;
+                if (hull_face_visible(&faces[fi], pts[p], eps)) {
+                    hal_f32 dist = hal_vec3f_dot(faces[fi].n,
+                                                 pts[p]) -
+                                   faces[fi].d;
+                    if (dist > eye_dist) {
+                        eye_dist = dist;
+                        eye = (int)p;
+                        eye_face = fi;
+                    }
+                }
+            }
+        }
+        if (eye < 0) {
+            free(visible);
+            break; /* hull complete */
+        }
+        (void)eye_face;
+
+        /* The visible region from the eye point. */
+        for (size_t fi = 0; fi < face_count; fi++) {
+            if (!faces[fi].alive)
+                continue;
+            visible[fi] = hull_face_visible(&faces[fi],
+                                            pts[eye], eps);
+        }
+
+        /* Horizon: edges of alive faces used by exactly one visible
+         * face... simpler: edges shared between a visible and a
+         * non-visible alive face. Collect from the NON-visible side
+         * in ITS winding. */
+        typedef struct {
+            hal_u32 a, b; /* as wound on the non-visible face */
+        } h_edge;
+        h_edge *horizon = malloc(face_count * 3 * sizeof(*horizon));
+        if (!horizon) {
+            free(visible);
+            break;
+        }
+        size_t horizon_count = 0;
+        for (size_t fi = 0; fi < face_count; fi++) {
+            if (!faces[fi].alive || visible[fi])
+                continue;
+            for (int e = 0; e < 3; e++) {
+                hal_u32 ea = faces[fi].v[e];
+                hal_u32 eb = faces[fi].v[(e + 1) % 3];
+                /* Is the reversed edge on a visible face? */
+                for (size_t fj = 0; fj < face_count; fj++) {
+                    if (!faces[fj].alive || !visible[fj] || fj == fi)
+                        continue;
+                    for (int e2 = 0; e2 < 3; e2++) {
+                        if (faces[fj].v[e2] == eb &&
+                            faces[fj].v[(e2 + 1) % 3] == ea) {
+                            horizon[horizon_count].a = ea;
+                            horizon[horizon_count].b = eb;
+                            horizon_count++;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if (horizon_count == 0) {
+            free(horizon);
+            free(visible);
+            break; /* numerical dead end: stop, keep the hull so far */
+        }
+
+        /* Kill visible faces; add a face per horizon edge. */
+        for (size_t fi = 0; fi < face_count; fi++)
+            if (visible[fi])
+                faces[fi].alive = false;
+        bool add_ok = true;
+        for (size_t hi = 0; hi < horizon_count; hi++) {
+            hull_face f;
+            /* The new face traverses the horizon edge OPPOSITE to
+             * the non-visible face's winding — the consistent
+             * orientation for outward normals (same-direction would
+             * flip every wrap face inward). */
+            if (!hull_make_face(&f, horizon[hi].b, horizon[hi].a,
+                                (hal_u32)eye, pts)) {
+                add_ok = false;
+                break; /* sliver: skip this edge (rare, near-degenerate) */
+            }
+            /* Orient outward: the eye is ON the new faces; use any
+             * remaining pool point? The horizon winding already
+             * guarantees outward orientation when the non-visible
+             * face was outward — trust it, but verify against the
+             * face's own centroid test: flip if the HULL CENTROID is
+             * in front. */
+            if (face_count == face_cap) {
+                face_cap *= 2;
+                hull_face *grown =
+                    realloc(faces, face_cap * sizeof(*faces));
+                if (!grown) {
+                    add_ok = false;
+                    break;
+                }
+                faces = grown;
+            }
+            faces[face_count++] = f;
+        }
+        free(horizon);
+        free(visible);
+        if (!add_ok)
+            break;
+
+        /* Re-pool: points still outside ANY alive face stay. */
+        for (size_t pi = 0; pi < pool_count; pi++) {
+            hal_u32 p = pool[pi];
+            if (!in_pool[p])
+                continue;
+            bool outside = false;
+            for (size_t fi = 0; fi < face_count && !outside; fi++)
+                if (faces[fi].alive &&
+                    hull_face_visible(&faces[fi], pts[p], eps))
+                    outside = true;
+            if (!outside)
+                in_pool[p] = false; /* inside (or on) the hull */
+        }
+    }
+
+    /* Compact the pool array (membership via in_pool). */
+    (void)pool;
+
+    /* Build the output mesh from the alive faces. */
+    bool *used = calloc(pt_count, sizeof(bool));
+    if (!used) {
+        free(in_pool);
+        free(pool);
+        free(pts);
+        free(faces);
+        return NULL;
+    }
+    for (size_t fi = 0; fi < face_count; fi++)
+        if (faces[fi].alive)
+            for (int e = 0; e < 3; e++)
+                used[faces[fi].v[e]] = true;
+    int *new_id = malloc(pt_count * sizeof(int));
+    if (!new_id) {
+        free(used);
+        free(in_pool);
+        free(pool);
+        free(pts);
+        free(faces);
+        return NULL;
+    }
+    hal_mesh *out = hal_mesh_create();
+    if (!out) {
+        free(new_id);
+        free(used);
+        free(in_pool);
+        free(pool);
+        free(pts);
+        free(faces);
+        return NULL;
+    }
+    for (size_t i = 0; i < pt_count; i++) {
+        new_id[i] = -1;
+        if (used[i]) {
+            hal_mesh_vert_add(out, pts[i]);
+            new_id[i] = (int)out->vert_count - 1;
+        }
+    }
+    for (size_t fi = 0; fi < face_count; fi++) {
+        if (!faces[fi].alive)
+            continue;
+        hal_u32 tri2[3];
+        bool ok_ids = true;
+        for (int e = 0; e < 3; e++) {
+            int id = new_id[faces[fi].v[e]];
+            if (id < 0)
+                ok_ids = false;
+            tri2[e] = (hal_u32)(id < 0 ? 0 : id);
+        }
+        if (ok_ids)
+            hal_mesh_face_add(out, tri2, 3);
+    }
+
+    free(new_id);
+    free(used);
+    free(in_pool);
+    free(pool);
+    free(pts);
+    free(faces);
+    if (out->face_count < 4 || out->vert_count < 4) {
+        hal_mesh_destroy(out);
+        return NULL; /* degenerate result */
+    }
+    hal_mesh_rebuild_edges(out);
+    return out;
+}

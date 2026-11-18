@@ -101,6 +101,14 @@ void hal_mesh_rebuild_edges(hal_mesh *m);
 /* Recomputes the normal caches (they are lazy; this forces). */
 void hal_mesh_recalc_normals(hal_mesh *m);
 
+/* ---- Convex hull (collision shapes) ----
+ * The convex hull of the mesh's vertices as a new closed triangle
+ * mesh (a collision shape). Returns NULL for degenerate inputs
+ * (coplanar/collinear point sets) — callers fall back to a box.
+ * Every input vertex lies on or inside the result (property-tested
+ * in the suite). */
+hal_mesh *hal_mesh_convex_hull(const hal_mesh *m);
+
 /* ---- Weight painting ----
  * Adjusts `bone`'s weight on every vert within `radius` (world
  * units) of `point` (world space, transformed back through `world`);

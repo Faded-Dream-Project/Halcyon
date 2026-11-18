@@ -761,6 +761,64 @@ static void collider_done(char *path, void *user) {
     free(path);
 }
 
+/* Convex collider export: the quickhull of the selected object's
+ * WORLD-space vertices, named <object>_UCX (the widely-read convex
+ * collision naming convention — see docs/decisions.md D-016).
+ * Degenerate inputs (coplanar point sets) report and suggest the box
+ * collider instead. */
+static void convex_done(char *path, void *user) {
+    hal_app *app = user;
+    if (!path) {
+        set_status(app, "Convex export cancelled");
+        return;
+    }
+    hal_object *obj =
+        hal_scene_object(app->scene, hal_scene_selected(app->scene));
+    if (!obj || !obj->mesh) {
+        set_status(app, "Convex: select a mesh object");
+        free(path);
+        return;
+    }
+
+    /* The source points in WORLD space. */
+    hal_mat4f world = hal_object_world_matrix(app->scene, obj);
+    hal_mesh *src = hal_mesh_create();
+    bool ok = src != NULL;
+    for (size_t v = 0; ok && v < obj->mesh->vert_count; v++)
+        hal_mesh_vert_add(
+            src, hal_mat4f_transform_point(world,
+                                           obj->mesh->verts[v]));
+    hal_mesh *hull = ok ? hal_mesh_convex_hull(src) : NULL;
+    hal_mesh_destroy(src);
+    if (!hull) {
+        set_status(app,
+                   "Convex: degenerate point set — use the box"
+                   " collider");
+        free(path);
+        return;
+    }
+
+    char name[128];
+    snprintf(name, sizeof(name), "%s_UCX", obj->name);
+    hal_scene *one = hal_scene_create("Collider");
+    hal_object_id id =
+        hal_scene_object_add(one, name, HAL_OBJECT_MESH);
+    hal_object_set_mesh(one, id, hull); /* world-space, identity */
+
+    char err[256] = { 0 };
+    hal_gltf_export_opts opts = hal_gltf_export_opts_default();
+    opts.z_up = app->export_z_up;
+    opts.unit_scale = app->export_cm ? 100.0f : 1.0f;
+    hal_result r =
+        hal_io_gltf_export_ex(one, path, &opts, err, sizeof(err));
+    set_status(app, r == HAL_OK ? "Convex collider (%zu tris) -> %s"
+                                : "Convex export failed",
+               r == HAL_OK ? hull->face_count : 0,
+               r == HAL_OK ? path : (err[0] ? err : "I/O error"));
+    hal_scene_destroy(one);
+    free(path);
+}
+
 /* Theme load: swap the UI theme and refresh the snapshot render
  * options (they copy theme colors at startup). */
 static void theme_done(char *path, void *user) {
@@ -950,6 +1008,8 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, file, "Export glTF: Centimeters", NULL,
                       menu_action, app);
     hal_menu_item_add(bar, file, "Export Box Collider (.glb)...",
+                      NULL, menu_action, app);
+    hal_menu_item_add(bar, file, "Export Convex Collider (.glb)...",
                       NULL, menu_action, app);
     hal_menu_item_add(bar, file, "Load Theme...", NULL, menu_action,
                       app);
@@ -1369,12 +1429,19 @@ static void menu_action(hal_widget *menubar, int menu, int item,
                 set_status(app, "Choose the collider output...");
             break;
         case 13:
+            if (hal_ok(hal_dialog_save_file(
+                    app->platform, "Export convex collider", "*.glb",
+                    "collider.glb", convex_done, app,
+                    app->window)))
+                set_status(app, "Choose the collider output...");
+            break;
+        case 14:
             if (hal_ok(hal_dialog_open_file(
                     app->platform, "Load theme", "*.haltheme",
                     theme_done, app, app->window)))
                 set_status(app, "Choose a theme file...");
             break;
-        case 15:
+        case 16:
             hal_app_quit(app);
             break;
         default:

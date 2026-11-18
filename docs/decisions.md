@@ -68,3 +68,14 @@ modern interchange every engine imports natively, and Halcyon
 already exports it with skins and animations; OBJ and binary STL
 cover the classic paths. Revisit if a concrete pipeline demands FBX;
 the honest cost is recorded here.
+
+## D-016: Collision shapes in glTF via a naming convention (2026-11-18)
+
+Halcyon exports colliders as plain glTF meshes rather than using an
+extension: box colliders as `<object>` and convex hulls as
+`<object>_UCX` (the prefix Unreal Engine tooling reads for convex
+collision, and a convention other engines can filter on trivially).
+The glTF `KHR_collision_*` extension proposals are drafts with thin
+importer support today; a naming convention is portable everywhere
+and needs no vendor registry entry. Revisit when a collision
+extension reaches ratification with importer adoption.

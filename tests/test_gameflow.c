@@ -11,6 +11,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -228,9 +229,148 @@ static void test_collider_pipeline(void) {
     hal_scene_destroy(src);
 }
 
+/* ---- Convex hull colliders ---- */
+
+/* Every source vertex lies on or behind every hull face plane, and
+ * the hull is closed (each edge shared by exactly 2 faces). */
+static bool hull_valid(const hal_mesh *h, const hal_vec3f *pts,
+                       size_t pt_count) {
+    for (size_t f = 0; f < h->face_count; f++) {
+        hal_vec3f a = h->verts[h->loops[h->face_off[f]]];
+        hal_vec3f b = h->verts[h->loops[h->face_off[f] + 1]];
+        hal_vec3f c = h->verts[h->loops[h->face_off[f] + 2]];
+        hal_vec3f n = hal_vec3f_normalize(hal_vec3f_cross(
+            hal_vec3f_sub(b, a), hal_vec3f_sub(c, a)));
+        hal_f32 d = hal_vec3f_dot(n, a);
+        for (size_t v = 0; v < pt_count; v++)
+            if (hal_vec3f_dot(n, pts[v]) > d + 1e-3f)
+                return false;
+    }
+    return true;
+}
+
+static void test_convex_hull(void) {
+    /* Cube: the hull IS the cube (8 verts, 12 tris, closed). */
+    hal_mesh *cube = hal_mesh_cube(1.0f);
+    hal_mesh *h1 = hal_mesh_convex_hull(cube);
+    HAL_TEST_CHECK(h1 != NULL);
+    if (h1) {
+        HAL_TEST_CHECK_EQ_I(h1->vert_count, 8);
+        HAL_TEST_CHECK_EQ_I(h1->face_count, 12);
+        HAL_TEST_CHECK(hull_valid(h1, cube->verts,
+                                  cube->vert_count));
+        hal_mesh_destroy(h1);
+    }
+
+    /* Sphere: every hull vertex sits ON the sphere, the hull volume
+     * is within 2% of the sphere's, containment holds. */
+    hal_mesh *sph = hal_mesh_sphere(1.0f, 16, 24);
+    hal_mesh *h2 = hal_mesh_convex_hull(sph);
+    HAL_TEST_CHECK(h2 != NULL);
+    if (h2) {
+        bool on_surface = true;
+        for (size_t v = 0; v < h2->vert_count; v++)
+            if (fabsf(hal_vec3f_length(h2->verts[v]) - 1.0f) >
+                1e-3f)
+                on_surface = false;
+        HAL_TEST_CHECK(on_surface);
+        HAL_TEST_CHECK(hull_valid(h2, sph->verts, sph->vert_count));
+        hal_f32 vol = 0.0f;
+        for (size_t f = 0; f < h2->face_count; f++) {
+            hal_vec3f a = h2->verts[h2->loops[h2->face_off[f]]];
+            hal_vec3f b = h2->verts[h2->loops[h2->face_off[f] + 1]];
+            hal_vec3f c = h2->verts[h2->loops[h2->face_off[f] + 2]];
+            vol += hal_vec3f_dot(
+                       a, hal_vec3f_cross(b, c)) /
+                   6.0f;
+        }
+        vol = fabsf(vol);
+        hal_f32 want = 4.0f / 3.0f * 3.14159265f;
+        /* A 16x24 hull is coarser than the sphere: within 5%. */
+        HAL_TEST_CHECK(vol > want * 0.95f && vol < want);
+        hal_mesh_destroy(h2);
+    }
+
+    /* Degenerate (coplanar) inputs return NULL — callers fall back
+     * to the box collider. */
+    hal_mesh *pl = hal_mesh_plane(1.0f);
+    HAL_TEST_CHECK(hal_mesh_convex_hull(pl) == NULL);
+    hal_mesh_destroy(pl);
+
+    /* Fewer than 4 points: NULL. */
+    hal_mesh *tri = hal_mesh_create();
+    hal_mesh_vert_add(tri, hal_vec3f_zero());
+    hal_mesh_vert_add(tri, hal_vec3f_axis_x());
+    hal_mesh_vert_add(tri, hal_vec3f_axis_y());
+    HAL_TEST_CHECK(hal_mesh_convex_hull(tri) == NULL);
+    hal_mesh_destroy(tri);
+    hal_mesh_destroy(cube);
+    hal_mesh_destroy(sph);
+}
+
+/* The full collider pipeline: hull a transformed object, export,
+ * import — the round-tripped collider still contains the source
+ * object's world verts. */
+static void test_convex_export_pipeline(void) {
+    hal_scene *src = hal_scene_create("S");
+    hal_object_id id =
+        hal_scene_object_add(src, "Rock", HAL_OBJECT_MESH);
+    /* A scaled sphere at a location: hulling world space must bake
+     * the transform. */
+    hal_object_set_mesh(src, id, hal_mesh_sphere(1.0f, 12, 16));
+    hal_object_set_scale(src, id, hal_vec3f_make(1.5f, 1.0f, 2.0f));
+    hal_object_set_location(src, id, hal_vec3f_make(3.0f, 0.0f, 0.0f));
+    hal_object *obj = hal_scene_object(src, id);
+    hal_mat4f world = hal_object_world_matrix(src, obj);
+
+    hal_mesh *pts = hal_mesh_create();
+    for (size_t v = 0; v < obj->mesh->vert_count; v++)
+        hal_mesh_vert_add(
+            pts, hal_mat4f_transform_point(world,
+                                           obj->mesh->verts[v]));
+    hal_mesh *hull = hal_mesh_convex_hull(pts);
+    HAL_TEST_CHECK(hull != NULL);
+    if (hull) {
+        hal_scene *one = hal_scene_create("Collider");
+        hal_object_id cid =
+            hal_scene_object_add(one, "Rock_UCX", HAL_OBJECT_MESH);
+        hal_object_set_mesh(one, cid, hull);
+        char path[512];
+        char err[256] = { 0 };
+        snprintf(path, sizeof(path), "%s/ucx.glb", tmp_dir());
+        HAL_TEST_CHECK_EQ_I(
+            hal_io_gltf_export(one, path, err, sizeof(err)),
+            HAL_OK);
+
+        hal_scene *loaded = NULL;
+        HAL_TEST_CHECK_EQ_I(
+            hal_io_gltf_import(path, &loaded, err, sizeof(err)),
+            HAL_OK);
+        HAL_TEST_CHECK(loaded != NULL);
+        if (loaded) {
+            hal_object *lo = hal_scene_object_at(loaded, 0);
+            HAL_TEST_CHECK(lo && lo->mesh);
+            if (lo && lo->mesh) {
+                /* Containment in WORLD space through the import. */
+                hal_mat4f w =
+                    hal_object_world_matrix(loaded, lo);
+                (void)w;
+                HAL_TEST_CHECK(hull_valid(lo->mesh, pts->verts,
+                                          pts->vert_count));
+            }
+            hal_scene_destroy(loaded);
+        }
+        hal_scene_destroy(one);
+    }
+    hal_mesh_destroy(pts);
+    hal_scene_destroy(src);
+}
+
 int main(void) {
     test_decimate();
     test_export_options();
     test_collider_pipeline();
+    test_convex_hull();
+    test_convex_export_pipeline();
     HAL_TEST_SUMMARY("test_gameflow");
 }

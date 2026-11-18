@@ -576,6 +576,27 @@ case; noted below).
   insert-then-delete, all driven by synthesized pointer events
   through hal_ui_handle_event.
 
+### Implemented and tested — convex-hull colliders (session 4)
+
+- hal_mesh_convex_hull (mesh_ops.c, from-scratch quickhull): unique
+  points, an extreme-point tetrahedron (coplanar/collinear sets bail
+  with NULL), then eye/horizon wrapping — visible faces die, each
+  horizon edge (traversed OPPOSITE to the non-visible face's winding
+  — the consistent-manifold orientation; the same-direction bug made
+  every wrap face inward and self-intersected the "hull", caught by
+  the containment property test) spawns a face to the eye. A guard
+  bounds iterations; degenerate results NULL.
+- Export: File > Export Convex Collider — the quickhull of the
+  selected object's WORLD-space verts as <object>_UCX (the Unreal-
+  readable convex prefix; D-016 records why a naming convention
+  beats the draft KHR_collision extensions), identity transform,
+  honoring the Z-up/centimeter options. Degenerate meshes report and
+  point at the box collider.
+- Tests (test_gameflow, 42 checks): cube hull exact (8/12), sphere
+  hull on-surface + volume within 5% + containment, coplanar/thin
+  sets NULL, and the world-space export round trip (the imported
+  collider still contains the source verts).
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -629,6 +650,12 @@ case; noted below).
 
 ## Log
 
+- **2026-11-18 — session 4, item 3: convex-hull colliders; v0.2.0.**
+  A from-scratch quickhull with horizon-walk wrapping (orientation
+  bug caught by the containment property test), exported as
+  _UCX-named glTF meshes in world space (D-016). 2358 headless
+  checks total. Tagged v0.2.0 (items 1-3 of the v0.2 plan done and
+  tested).
 - **2026-11-18 — session 4, item 2: interactive curve editor.** Key
   drag (time+value, re-sorted), easing cycle, insert/delete, one undo
   per edit; a generic widget event hook in the UI input dispatch.

@@ -4,6 +4,13 @@ The format follows keep-a-changelog (Added / Changed / Fixed /
 Removed); dates are ISO. Everything listed here is built and tested —
 PROGRESS.md carries the honest ledger of what is NOT done yet.
 
+## [v0.2.0] — 2026-11-18
+
+Robust glTF import (foreign rigs exact, materials, textures in all
+three flavors, multi-primitive meshes), the fully interactive curve
+editor (drag/easing/insert/delete, undoable), and convex-hull
+collider export (_UCX naming convention, D-016).
+
 ## [Unreleased]
 
 ### Added — interactive curve editor (2026-11-18, session 4)
