@@ -4,8 +4,10 @@
  */
 
 #include "shell.h"
+#include "core/material.h"
 #include "core/mesh.h"
 #include "core/mesh_ops.h"
+#include "core/uv.h"
 #include "io/io.h"
 #include "core/project.h"
 #include "render/pick.h"
@@ -49,6 +51,13 @@ struct hal_app {
     /* Entry buffers (owned here, pointed at by the entries). */
     char name_buf[64];
     char loc_buf[3][32];
+    char mat_buf[3][16];
+    hal_f32 metallic_value, rough_value;
+
+    /* Sidebar widgets. */
+    hal_widget *mat_entry[3];
+    hal_widget *metallic_slider, *rough_slider;
+    hal_widget *uvview;
 
     /* The 3D viewport. */
     hal_camera camera;
@@ -181,6 +190,27 @@ static void refresh_properties(hal_app *app) {
                  (double)obj->location.y);
         snprintf(app->loc_buf[2], sizeof(app->loc_buf[2]), "%.3f",
                  (double)obj->location.z);
+
+        hal_material *mat = obj->material >= 0
+                                ? hal_scene_material(app->scene,
+                                                     obj->material)
+                                : NULL;
+        if (mat) {
+            snprintf(app->mat_buf[0], sizeof(app->mat_buf[0]), "%.2f",
+                     (double)mat->base_color.r);
+            snprintf(app->mat_buf[1], sizeof(app->mat_buf[1]), "%.2f",
+                     (double)mat->base_color.g);
+            snprintf(app->mat_buf[2], sizeof(app->mat_buf[2]), "%.2f",
+                     (double)mat->base_color.b);
+            app->metallic_value = mat->metallic;
+            app->rough_value = mat->roughness;
+        } else {
+            for (int i = 0; i < 3; i++)
+                app->mat_buf[i][0] = '\0';
+            app->metallic_value = 0.0f;
+            app->rough_value = 0.5f;
+        }
+        hal_uvview_bind(app->uvview, obj->mesh);
     }
     hal_ui_invalidate(app->ui);
 }
@@ -230,6 +260,36 @@ static void on_loc_changed(hal_widget *entry, void *user) {
 
     hal_object_set_location(app->scene, obj->id, new_loc);
     push_location_undo(app, obj->id, old);
+    app->dirty = true;
+    hal_autosave_mark_dirty(app->autosave);
+}
+
+static void on_mat_changed(hal_widget *entry, void *user) {
+    hal_app *app = user;
+    (void)entry;
+    hal_object *obj =
+        hal_scene_object(app->scene, hal_scene_selected(app->scene));
+    if (!obj || obj->material < 0 || app->syncing)
+        return;
+    hal_material *mat = hal_scene_material(app->scene, obj->material);
+    if (!mat)
+        return;
+    int axis = -1;
+    for (int i = 0; i < 3; i++)
+        if (app->mat_entry[i] == entry)
+            axis = i;
+    if (axis < 0)
+        return;
+    char *end = NULL;
+    double v = strtod(app->mat_buf[axis], &end);
+    if (!end || end == app->mat_buf[axis] || v < 0.0 || v > 1.0)
+        return; /* still typing / out of range */
+    if (axis == 0)
+        mat->base_color.r = (hal_f32)v;
+    else if (axis == 1)
+        mat->base_color.g = (hal_f32)v;
+    else
+        mat->base_color.b = (hal_f32)v;
     app->dirty = true;
     hal_autosave_mark_dirty(app->autosave);
 }
@@ -393,6 +453,19 @@ static bool op_flip(hal_mesh *m, void *user) {
     hal_mesh_rebuild_edges(m);
     return true;
 }
+typedef struct op_unwrap_user {
+    int mode; /* 0 planar X, 1 planar Y, 2 planar Z, 3 box, 4 smart */
+} op_unwrap_user;
+static bool op_unwrap(hal_mesh *m, void *user) {
+    op_unwrap_user *u = user;
+    switch (u->mode) {
+    case 0: return hal_mesh_unwrap_planar(m, HAL_UV_X);
+    case 1: return hal_mesh_unwrap_planar(m, HAL_UV_Y);
+    case 2: return hal_mesh_unwrap_planar(m, HAL_UV_Z);
+    case 3: return hal_mesh_unwrap_box(m);
+    default: return hal_mesh_unwrap_smart(m);
+    }
+}
 static bool op_recalc(hal_mesh *m, void *user) {
     (void)user;
     hal_mesh_recalc_normals(m);
@@ -531,6 +604,13 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, edit, "Flip Normals", NULL, menu_action, app);
     hal_menu_item_add(bar, edit, "Recalc Normals", NULL, menu_action, app);
     hal_menu_item_add(bar, edit, "Smooth Shading", NULL, menu_action, app);
+    hal_menu_item_add(bar, edit, NULL, NULL, NULL, NULL);
+    hal_menu_item_add(bar, edit, "Unwrap Planar X", NULL, menu_action, app);
+    hal_menu_item_add(bar, edit, "Unwrap Planar Y", NULL, menu_action, app);
+    hal_menu_item_add(bar, edit, "Unwrap Planar Z", NULL, menu_action, app);
+    hal_menu_item_add(bar, edit, "Unwrap Box", NULL, menu_action, app);
+    hal_menu_item_add(bar, edit, "Unwrap Smart (lite)", NULL, menu_action, app);
+    hal_menu_item_add(bar, edit, "New Material", NULL, menu_action, app);
     hal_menu_item_add(bar, edit, NULL, NULL, NULL, NULL);
     hal_menu_item_add(bar, edit, "Select All", "A", menu_action, app);
     hal_menu_item_add(bar, edit, "Deselect All", "Alt+A", menu_action, app);
@@ -832,14 +912,42 @@ static void menu_action(hal_widget *menubar, int menu, int item,
             }
             break;
         }
-        case 19: {
+        case 19:
+        case 20:
+        case 21:
+        case 22:
+        case 23: {
+            static op_unwrap_user uu;
+            uu.mode = item - 19;
+            apply_mesh_op(app, "Unwrap", op_unwrap, &uu);
+            break;
+        }
+        case 24: {
+            /* New Material: creates one and assigns it to the
+             * selected object. */
+            hal_object_id sel = hal_scene_selected(app->scene);
+            hal_object *obj = hal_scene_object(app->scene, sel);
+            if (!obj)
+                break;
+            hal_material mat = hal_material_default();
+            snprintf(mat.name, sizeof(mat.name), "Material %zu",
+                     hal_scene_material_count(app->scene));
+            int idx = hal_scene_material_add(app->scene, &mat);
+            if (idx >= 0) {
+                hal_object_set_material(app->scene, sel, idx);
+                set_status(app, "Created %s", mat.name);
+                app->dirty = true;
+            }
+            break;
+        }
+        case 25: {
             hal_object *obj =
                 hal_scene_object(app->scene, app->edit_obj);
             if (obj && obj->mesh)
                 hal_mesh_select_all(obj->mesh, true);
             break;
         }
-        case 20: {
+        case 26: {
             hal_object *obj =
                 hal_scene_object(app->scene, app->edit_obj);
             if (obj && obj->mesh)
@@ -920,6 +1028,28 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
                                              sizeof(app->loc_buf[i]));
         hal_entry_set_on_change(app->loc_entry[i], on_loc_changed, app);
     }
+
+    /* Material section + the UV editor (bound on selection). */
+    hal_widget *mat_panel = hal_panel_create(sidebar, "Material");
+    hal_widget *mat_col = hal_column_create(mat_panel);
+    hal_widget *col_row = hal_row_create(mat_col);
+    hal_label_create(col_row, "Color");
+    for (int i = 0; i < 3; i++) {
+        app->mat_entry[i] = hal_entry_create(col_row, app->mat_buf[i],
+                                             sizeof(app->mat_buf[i]));
+        hal_entry_set_on_change(app->mat_entry[i], on_mat_changed, app);
+    }
+    hal_widget *mr_row = hal_row_create(mat_col);
+    hal_label_create(mr_row, "Metal");
+    app->metallic_slider =
+        hal_slider_create(mr_row, 0.0f, 1.0f, &app->metallic_value);
+    hal_widget *rg_row = hal_row_create(mat_col);
+    hal_label_create(rg_row, "Rough");
+    app->rough_slider =
+        hal_slider_create(rg_row, 0.0f, 1.0f, &app->rough_value);
+
+    hal_widget *uv_panel = hal_panel_create(sidebar, "UV Editor");
+    app->uvview = hal_uvview_create(uv_panel);
 
     /* Status bar. */
     app->status = hal_label_create(hal_ui_root(app->ui), "Welcome");
@@ -1407,10 +1537,10 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
             return true;
         case 30: /* A */
             if (event->key.modifiers & HAL_MOD_ALT) {
-                menu_action(NULL, 1, 20, app);
+                menu_action(NULL, 1, 26, app);
                 set_status(app, "Deselected");
             } else {
-                menu_action(NULL, 1, 19, app);
+                menu_action(NULL, 1, 25, app);
                 set_status(app, "Selected all");
             }
             return true;

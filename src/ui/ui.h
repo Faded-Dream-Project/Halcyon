@@ -24,6 +24,7 @@
 #ifndef HAL_UI_H
 #define HAL_UI_H
 
+#include "../core/mesh.h"
 #include "../platform/platform.h"
 #include "../platform/types.h"
 #include "canvas.h"
@@ -85,6 +86,7 @@ typedef enum hal_widget_kind {
     HAL_WIDGET_TABS,     /* tab strip + stacked pages           */
     HAL_WIDGET_TREE,     /* tree view (outliner)                */
     HAL_WIDGET_MENUBAR,  /* the menu bar                        */
+    HAL_WIDGET_UVVIEW,   /* bound UV layout viewer              */
 } hal_widget_kind;
 
 /* ---- Constructors (each appends to `parent`) ---- */
@@ -146,6 +148,12 @@ void *hal_tree_row_user(const hal_tree_row *row);
 bool hal_tree_row_expanded(const hal_tree_row *row);
 /* A row's window-logical rect (the tree positions rows on demand). */
 hal_rectf hal_tree_row_rect(hal_widget *tree, const hal_tree_row *row);
+
+/* UV editor: paints the bound mesh's UV layout (grid, face loops,
+ * selected faces highlighted). The mesh is BORROWED (the app keeps it
+ * alive); NULL clears. */
+hal_widget *hal_uvview_create(hal_widget *parent);
+void hal_uvview_bind(hal_widget *uvview, const hal_mesh *mesh);
 
 /* Menu bar: menus with items. Items act through on_activate. */
 hal_widget *hal_menubar_create(hal_widget *parent);

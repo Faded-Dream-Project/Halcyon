@@ -27,6 +27,7 @@ void hal_mesh_destroy(hal_mesh *mesh) {
     free(mesh->vert_sel);
     free(mesh->edge_sel);
     free(mesh->face_sel);
+    free(mesh->uvs);
     free(mesh);
 }
 
@@ -96,6 +97,24 @@ int hal_mesh_edge_add(hal_mesh *m, hal_u32 a, hal_u32 b) {
     return (int)m->edge_count - 1;
 }
 
+/* Grows the per-loop UV array alongside the loops (new entries start
+ * at (0,0); unwraps overwrite them). */
+static bool grow_uvs(hal_mesh *m, size_t need_loops) {
+    if (need_loops <= m->uv_cap)
+        return true;
+    size_t cap = m->uv_cap ? m->uv_cap : 16;
+    while (cap < need_loops)
+        cap *= 2;
+    hal_vec2f *grown = realloc(m->uvs, cap * sizeof(*grown));
+    if (!grown)
+        return false;
+    for (size_t i = m->uv_cap; i < cap; i++)
+        grown[i] = (hal_vec2f){ 0.0f, 0.0f };
+    m->uvs = grown;
+    m->uv_cap = cap;
+    return true;
+}
+
 int hal_mesh_face_add(hal_mesh *m, const hal_u32 *corners, size_t count) {
     if (!m || !corners || count < 3)
         return -1;
@@ -104,7 +123,8 @@ int hal_mesh_face_add(hal_mesh *m, const hal_u32 *corners, size_t count) {
             return -1;
 
     if (!grow_bytes((void **)&m->loops, &m->loop_cap, m->loop_count + count,
-                    sizeof(hal_u32)))
+                    sizeof(hal_u32)) ||
+        !grow_uvs(m, m->loop_count + count))
         return -1;
     /* face_off needs face_count + 2 live entries when a face is being
      * added: indices 0..face_count+1 (the leading 0 plus the new

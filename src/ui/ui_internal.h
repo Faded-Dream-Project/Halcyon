@@ -52,6 +52,9 @@ typedef union hal_widget_state {
         bool vertical; /* column vs row */
     } box;
     struct {
+        const hal_mesh *mesh; /* borrowed */
+    } uvview;
+    struct {
         int active;
     } tabs;
     struct {
@@ -171,6 +174,9 @@ bool hal__input_menu_pointer(hal_ui *ui, const hal_event *event,
 hal_menubar_data *hal__menubar_data(hal_widget *menubar);
 hal_rectf hal__menu_popup_rect(hal_ui *ui);
 hal_rectf hal__menu_item_rect(hal_ui *ui, int item_index);
+
+/* uvview.c */
+void hal__uvview_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);
 
 /* tree.c */
 void hal__tree_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);

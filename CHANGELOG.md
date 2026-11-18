@@ -6,6 +6,19 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — M6: materials & UVs (2026-11-18)
+
+- PBR-style materials (base color, metallic, roughness, emissive,
+  texture slot) with a scene material list and per-object slots;
+  scene image list.
+- Per-loop UV storage, compaction-safe; unwrap operators: planar,
+  box, smart-lite — all undoable, on the Edit menu.
+- UV editor widget in the sidebar; material panel (color entries,
+  metallic/roughness sliders, New Material).
+- Viewport shades by material base color + emissive.
+- glTF export with materials, TEXCOORD_0, embedded textures; project
+  format v3 (materials + images; v1/v2 still load). 818 new checks.
+
 ### Added — M5: export/import (2026-11-18)
 
 - glTF 2.0 GLB export (meshes, normals, TRS + hierarchy) and import

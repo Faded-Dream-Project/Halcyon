@@ -45,6 +45,13 @@ typedef struct hal_mesh {
     size_t face_count;
     size_t face_cap;
 
+    /* Per-corner (per-loop) texture coordinates, one per loop entry;
+     * NULL until an unwrap fills them. uvs[loop] with v flipped for
+     * image conventions (stored with +v DOWN like glTF/OGL images). */
+    hal_vec2f *uvs;
+    size_t uv_cap; /* private growth state                    */
+    bool uvs_valid; /* set by an unwrap; cleared when loops are
+                     * rebuilt from scratch                    */
     /* Edit-mode selection, one byte per element, grown with the
      * arrays (see mesh_ops.h). The capacities are private growth
      * state; readers use the counts above. */

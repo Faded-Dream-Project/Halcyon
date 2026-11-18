@@ -18,6 +18,7 @@
 
 #include "../platform/types.h"
 #include "math.h"
+#include "material.h"
 #include "mesh.h"
 
 #include <stdbool.h>
@@ -27,7 +28,10 @@
 extern "C" {
 #endif
 
+#ifndef HAL_OBJECT_ID_DEFINED
+#define HAL_OBJECT_ID_DEFINED
 typedef hal_u32 hal_object_id;
+#endif
 #define HAL_OBJECT_ID_NONE 0u
 
 typedef enum hal_object_type {
@@ -42,6 +46,7 @@ typedef struct hal_object {
     char *name;              /* owned; never NULL                     */
     hal_object_type type;
     hal_mesh *mesh;          /* owned payload; NULL unless MESH       */
+    int material;            /* scene material index, -1 = none       */
 
     /* Local transform (the glTF TRS triple). */
     hal_vec3f location;
@@ -65,6 +70,10 @@ typedef struct hal_scene {
     size_t count;
     size_t capacity;
     hal_object_id next_id;
+    hal_material *materials; /* owned material list                   */
+    size_t material_count;
+    char **images;           /* owned image file paths (textures)     */
+    size_t image_count;
 } hal_scene;
 
 /* ---- Scene lifecycle ---- */

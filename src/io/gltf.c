@@ -17,6 +17,7 @@
 
 #include "io.h"
 
+#include "../core/material.h"
 #include "../core/mesh_ops.h"
 
 #include <math.h>
@@ -112,14 +113,12 @@ typedef struct gltf_node_out {
     size_t mesh_index; /* glTF mesh index                      */
 } gltf_node_out;
 
-static bool gltf_write_mesh(hal_object *obj, buf *bin,
-                            const gltf_node_out *nodes, size_t node_count,
-                            size_t *out_pos_acc, size_t *out_nrm_acc,
-                            size_t *out_idx_acc, size_t *out_tri_count,
+static bool gltf_write_mesh(hal_object *obj, buf *bin, size_t *out_pos_off,
+                            size_t *out_nrm_off, size_t *out_uv_off,
+                            size_t *out_idx_off, bool *out_has_uv,
+                            size_t *out_tri_count,
                             size_t *out_vert_count, hal_vec3f *out_min,
                             hal_vec3f *out_max) {
-    (void)nodes;
-    (void)node_count;
     hal_mesh *m = obj->mesh;
     const hal_vec3f *fn = hal_mesh_face_normals(m);
     const hal_vec3f *vn =
@@ -127,13 +126,6 @@ static bool gltf_write_mesh(hal_object *obj, buf *bin,
     if (!fn)
         return false;
 
-    /* Triangulate (fan) into index triples; positions and normals are
-     * per-USED-vertex? No — glTF primitives share one vertex stream:
-     * write every original vertex once and index into it, with the
-     * SMOOTH normal per vertex. Flat shading exports the face normal
-     * per CORNER, which needs per-corner duplication — so flat meshes
-     * write a duplicated position stream too (dedup would need a
-     * remap pass; correctness first). */
     size_t tri_count = 0;
     for (size_t f = 0; f < m->face_count; f++) {
         size_t n = m->face_off[f + 1] - m->face_off[f];
@@ -141,10 +133,13 @@ static bool gltf_write_mesh(hal_object *obj, buf *bin,
             tri_count += n - 2;
     }
 
-    bool smooth = vn != NULL;
+    /* Per-corner UVs force a duplicated stream even for smooth
+     * shading (seams must survive); otherwise smooth meshes share
+     * the original verts. */
+    bool has_uv = m->uvs != NULL && m->uvs_valid;
+    bool smooth = vn != NULL && !has_uv;
     size_t out_verts = smooth ? m->vert_count : tri_count * 3;
 
-    /* Align to 4 bytes (everything below is 4-byte typed). */
     while (bin->len % 4 != 0)
         if (!buf_put(bin, "\0", 1))
             return false;
@@ -152,7 +147,31 @@ static bool gltf_write_mesh(hal_object *obj, buf *bin,
     size_t pos_off = bin->len;
     hal_vec3f bmin = { 1e30f, 1e30f, 1e30f };
     hal_vec3f bmax = { -1e30f, -1e30f, -1e30f };
+    hal_u32 corner_idx[3];
 
+    /* One macro-driven walk over triangle corners keeps the three
+     * streams in lockstep. */
+    for (size_t f = 0; f < m->face_count; f++) {
+        size_t n = m->face_off[f + 1] - m->face_off[f];
+        for (size_t k = 0; k + 2 < n; k++) {
+            corner_idx[0] = m->loops[m->face_off[f]];
+            corner_idx[1] = m->loops[m->face_off[f] + k + 1];
+            corner_idx[2] = m->loops[m->face_off[f] + k + 2];
+            for (int c = 0; c < 3; c++) {
+                if (smooth)
+                    continue; /* positions written once, below */
+                hal_vec3f p = m->verts[corner_idx[c]];
+                if (!buf_put(bin, &p, sizeof(p)))
+                    return false;
+                bmin.x = fminf(bmin.x, p.x);
+                bmin.y = fminf(bmin.y, p.y);
+                bmin.z = fminf(bmin.z, p.z);
+                bmax.x = fmaxf(bmax.x, p.x);
+                bmax.y = fmaxf(bmax.y, p.y);
+                bmax.z = fmaxf(bmax.z, p.z);
+            }
+        }
+    }
     if (smooth) {
         for (size_t v = 0; v < m->vert_count; v++) {
             hal_vec3f p = m->verts[v];
@@ -165,29 +184,7 @@ static bool gltf_write_mesh(hal_object *obj, buf *bin,
             bmax.y = fmaxf(bmax.y, p.y);
             bmax.z = fmaxf(bmax.z, p.z);
         }
-    } else {
-        for (size_t f = 0; f < m->face_count; f++) {
-            size_t n = m->face_off[f + 1] - m->face_off[f];
-            for (size_t i = 0; i + 2 < n; i++) {
-                hal_u32 idx[3] = { m->loops[m->face_off[f]],
-                                   m->loops[m->face_off[f] + i + 1],
-                                   m->loops[m->face_off[f] + i + 2] };
-                for (int k = 0; k < 3; k++) {
-                    if (!buf_put(bin, &m->verts[idx[k]],
-                                 sizeof(hal_vec3f)))
-                        return false;
-                    hal_vec3f p = m->verts[idx[k]];
-                    bmin.x = fminf(bmin.x, p.x);
-                    bmin.y = fminf(bmin.y, p.y);
-                    bmin.z = fminf(bmin.z, p.z);
-                    bmax.x = fmaxf(bmax.x, p.x);
-                    bmax.y = fmaxf(bmax.y, p.y);
-                    bmax.z = fmaxf(bmax.z, p.z);
-                }
-            }
-        }
     }
-    size_t pos_len = bin->len - pos_off;
 
     size_t nrm_off = bin->len;
     if (smooth) {
@@ -197,22 +194,40 @@ static bool gltf_write_mesh(hal_object *obj, buf *bin,
     } else {
         for (size_t f = 0; f < m->face_count; f++) {
             size_t n = m->face_off[f + 1] - m->face_off[f];
-            for (size_t i = 0; i + 2 < n; i++)
-                for (int k = 0; k < 3; k++)
-                    if (!buf_put(bin, &fn[f], sizeof(hal_vec3f)))
+            for (size_t k = 0; k + 2 < n; k++)
+                for (int c = 0; c < 3; c++) {
+                    const hal_vec3f *nrm =
+                        has_uv && vn ? &vn[m->loops[m->face_off[f] +
+                                                    (k == 0 ? 0 : k + 1)]]
+                                     : &fn[f];
+                    if (!buf_put(bin, nrm, sizeof(hal_vec3f)))
                         return false;
+                }
         }
     }
-    size_t nrm_len = bin->len - nrm_off;
+
+    size_t uv_off = bin->len;
+    if (has_uv) {
+        for (size_t f = 0; f < m->face_count; f++) {
+            size_t n = m->face_off[f + 1] - m->face_off[f];
+            for (size_t k = 0; k + 2 < n; k++)
+                for (int c = 0; c < 3; c++) {
+                    size_t corner = c == 0 ? (size_t)0 : k + (size_t)c;
+                    size_t loop = m->face_off[f] + corner;
+                    if (!buf_put(bin, &m->uvs[loop], sizeof(hal_vec2f)))
+                        return false;
+                }
+        }
+    }
 
     size_t idx_off = bin->len;
     if (smooth) {
         for (size_t f = 0; f < m->face_count; f++) {
             size_t n = m->face_off[f + 1] - m->face_off[f];
-            for (size_t i = 0; i + 2 < n; i++) {
+            for (size_t k = 0; k + 2 < n; k++) {
                 hal_u32 tri[3] = { m->loops[m->face_off[f]],
-                                   m->loops[m->face_off[f] + i + 1],
-                                   m->loops[m->face_off[f] + i + 2] };
+                                   m->loops[m->face_off[f] + k + 1],
+                                   m->loops[m->face_off[f] + k + 2] };
                 if (!buf_put(bin, tri, sizeof(tri)))
                     return false;
             }
@@ -222,16 +237,12 @@ static bool gltf_write_mesh(hal_object *obj, buf *bin,
             if (!buf_put(bin, &i, sizeof(i)))
                 return false;
     }
-    size_t idx_len = bin->len - idx_off;
 
-    *out_pos_acc = pos_off;
-    *out_nrm_acc = nrm_off;
-    *out_idx_acc = idx_off;
-    /* The caller needs lengths, not offsets; fold them through the
-     * count fields. */
-    (void)pos_len;
-    (void)nrm_len;
-    (void)idx_len;
+    *out_pos_off = pos_off;
+    *out_nrm_off = nrm_off;
+    *out_uv_off = uv_off;
+    *out_idx_off = idx_off;
+    *out_has_uv = has_uv;
     *out_tri_count = tri_count;
     *out_vert_count = out_verts;
     *out_min = bmin;
@@ -246,7 +257,7 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
         return HAL_ERR_INVALID_ARGUMENT;
     }
 
-    /* Pass 1: fill the BIN buffer and remember per-mesh block info. */
+    /* Pass 1: BIN buffer blocks per mesh object. */
     buf bin = { 0 };
     size_t mesh_count = 0;
     for (size_t i = 0; i < scene->count; i++)
@@ -254,10 +265,13 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
             mesh_count++;
 
     typedef struct mesh_blocks {
-        size_t pos_off, nrm_off, idx_off;
+        size_t pos_off, nrm_off, uv_off, idx_off;
+        bool has_uv;
         size_t tri_count, vert_count;
         hal_vec3f bmin, bmax;
-        size_t node_index;
+        int material; /* object material index or -1            */
+        size_t a_pos, a_nrm, a_uv, a_idx; /* accessor indices    */
+        size_t v_pos, v_nrm, v_uv, v_idx; /* bufferView indices  */
     } mesh_blocks;
     mesh_blocks *blocks =
         calloc(mesh_count ? mesh_count : 1, sizeof(mesh_blocks));
@@ -271,8 +285,9 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
         hal_object *obj = &scene->objects[i];
         if (!obj->mesh)
             continue;
-        if (!gltf_write_mesh(obj, &bin, NULL, 0, &blocks[bi].pos_off,
-                             &blocks[bi].nrm_off, &blocks[bi].idx_off,
+        if (!gltf_write_mesh(obj, &bin, &blocks[bi].pos_off,
+                             &blocks[bi].nrm_off, &blocks[bi].uv_off,
+                             &blocks[bi].idx_off, &blocks[bi].has_uv,
                              &blocks[bi].tri_count,
                              &blocks[bi].vert_count, &blocks[bi].bmin,
                              &blocks[bi].bmax)) {
@@ -281,19 +296,86 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
             io_err(err, err_cap, "out of memory while writing buffers");
             return HAL_ERR_OUT_OF_MEMORY;
         }
-        blocks[bi].node_index = i; /* scene object order */
+        blocks[bi].material = obj->material;
         bi++;
     }
 
-    /* Pass 2: the JSON document. Node i of the glTF scene mirrors
-     * scene object i (meshless objects export as empty nodes so the
-     * hierarchy keeps its shape). */
+    /* Sequential accessor / bufferView indices (UV slots exist only
+     * for meshes with UVs, so fixed strides would misnumber mixed
+     * scenes). */
+    {
+        size_t acc = 0, view = 0;
+        for (size_t mi = 0; mi < mesh_count; mi++) {
+            blocks[mi].a_pos = acc++;
+            blocks[mi].a_nrm = acc++;
+            blocks[mi].a_uv = blocks[mi].has_uv ? acc++ : (size_t)-1;
+            blocks[mi].a_idx = acc++;
+            blocks[mi].v_pos = view++;
+            blocks[mi].v_nrm = view++;
+            blocks[mi].v_uv = blocks[mi].has_uv ? view++ : (size_t)-1;
+            blocks[mi].v_idx = view++;
+        }
+    }
+
+    /* Image embedding: scene images referenced by any exported
+     * material, appended to the BIN buffer. */
+    typedef struct image_block {
+        int scene_index;
+        size_t bin_off, bin_len;
+    } image_block;
+    image_block *images_out = NULL;
+    size_t image_out_count = 0;
+    for (int mi = 0; mi < (int)scene->material_count; mi++) {
+        int img = scene->materials[mi].texture;
+        if (img < 0)
+            continue;
+        bool already = false;
+        for (size_t k = 0; k < image_out_count; k++)
+            if (images_out[k].scene_index == img)
+                already = true;
+        if (already)
+            continue;
+        const char *ipath = hal_scene_image(scene, img);
+        if (!ipath)
+            continue;
+        FILE *im = fopen(ipath, "rb");
+        if (!im)
+            continue;
+        fseek(im, 0, SEEK_END);
+        long isz = ftell(im);
+        rewind(im);
+        if (isz <= 0 || isz > 64 * 1024 * 1024) {
+            fclose(im);
+            continue;
+        }
+        image_block *grown = realloc(
+            images_out, (image_out_count + 1) * sizeof(*grown));
+        if (!grown) {
+            fclose(im);
+            continue;
+        }
+        images_out = grown;
+        unsigned char *bytes = malloc((size_t)isz);
+        if (!bytes || fread(bytes, 1, (size_t)isz, im) != (size_t)isz) {
+            free(bytes);
+            fclose(im);
+            continue;
+        }
+        fclose(im);
+        images_out[image_out_count].scene_index = img;
+        images_out[image_out_count].bin_off = bin.len;
+        images_out[image_out_count].bin_len = (size_t)isz;
+        image_out_count++;
+        buf_put(&bin, bytes, (size_t)isz);
+        free(bytes);
+    }
+
+    /* Pass 2: JSON. */
     buf js = { 0 };
     if (!buf_puts(&js, "{\"asset\":{\"version\":\"2.0\","
                        "\"generator\":\"Halcyon\"},"))
         goto oom;
 
-    /* Root nodes: objects without parents. */
     if (!buf_puts(&js, "\"scene\":0,\"scenes\":[{\"nodes\":["))
         goto oom;
     bool first = true;
@@ -307,87 +389,113 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
     if (!buf_puts(&js, "]}],"))
         goto oom;
 
-    /* Nodes. */
     if (!buf_puts(&js, "\"nodes\":["))
         goto oom;
     for (size_t i = 0; i < scene->count; i++) {
         const hal_object *o = &scene->objects[i];
         if (!buf_putf(&js, "%s{", i ? "," : ""))
             goto oom;
-        if (!buf_puts(&js, "\"name\":"))
+        if (!buf_puts(&js, "\"name\":") ||
+            !buf_put_json_str(&js, o->name))
             goto oom;
-        if (!buf_put_json_str(&js, o->name))
-            goto oom;
-        /* children (objects whose parent is this object) */
+        /* children array once, listing every object parented here. */
         first = true;
         for (size_t c = 0; c < scene->count; c++)
             if (scene->objects[c].parent == o->id) {
-                if (!buf_putf(&js, "%s\"children\":[", first ? "," : ""))
-                    goto oom;
-                /* open the array once, then list */
-                buf tmp_skip = { 0 }; /* placeholder to keep flow simple */
-                (void)tmp_skip;
-                bool inner_first = true;
-                for (size_t c2 = 0; c2 < scene->count; c2++)
-                    if (scene->objects[c2].parent == o->id) {
-                        if (!buf_putf(&js, "%s%zu",
-                                      inner_first ? "" : ",", c2))
-                            goto oom;
-                        inner_first = false;
-                    }
-                if (!buf_puts(&js, "]"))
-                    goto oom;
-                first = false;
-                break; /* the array was written once */
+                if (first) {
+                    if (!buf_puts(&js, ",\"children\":["))
+                        goto oom;
+                    bool inner_first = true;
+                    for (size_t c2 = 0; c2 < scene->count; c2++)
+                        if (scene->objects[c2].parent == o->id) {
+                            if (!buf_putf(&js, "%s%zu",
+                                          inner_first ? "" : ",", c2))
+                                goto oom;
+                            inner_first = false;
+                        }
+                    if (!buf_puts(&js, "]"))
+                        goto oom;
+                    first = false;
+                }
+                break;
             }
-        {
-            /* Mesh index: the j-th mesh object in order. */
-            size_t mesh_idx = 0;
-            bool has_mesh = o->mesh != NULL;
-            if (has_mesh) {
-                size_t j = 0;
-                for (size_t k = 0; k <= i; k++)
-                    if (scene->objects[k].mesh)
-                        j++;
-                mesh_idx = j - 1;
-                if (!buf_putf(&js, ",\"mesh\":%zu", mesh_idx))
-                    goto oom;
-            }
-            if (!buf_putf(&js,
-                          ",\"translation\":[%.9g,%.9g,%.9g],"
-                          "\"rotation\":[%.9g,%.9g,%.9g,%.9g],"
-                          "\"scale\":[%.9g,%.9g,%.9g]",
-                          (double)o->location.x, (double)o->location.y,
-                          (double)o->location.z, (double)o->rotation.x,
-                          (double)o->rotation.y, (double)o->rotation.z,
-                          (double)o->rotation.w, (double)o->scale.x,
-                          (double)o->scale.y, (double)o->scale.z))
+        if (o->mesh) {
+            size_t j = 0;
+            for (size_t k = 0; k <= i; k++)
+                if (scene->objects[k].mesh)
+                    j++;
+            if (!buf_putf(&js, ",\"mesh\":%zu", j - 1))
                 goto oom;
         }
+        if (!buf_putf(&js,
+                      ",\"translation\":[%.9g,%.9g,%.9g],"
+                      "\"rotation\":[%.9g,%.9g,%.9g,%.9g],"
+                      "\"scale\":[%.9g,%.9g,%.9g]",
+                      (double)o->location.x, (double)o->location.y,
+                      (double)o->location.z, (double)o->rotation.x,
+                      (double)o->rotation.y, (double)o->rotation.z,
+                      (double)o->rotation.w, (double)o->scale.x,
+                      (double)o->scale.y, (double)o->scale.z))
+            goto oom;
         if (!buf_puts(&js, "}"))
             goto oom;
     }
     if (!buf_puts(&js, "],"))
         goto oom;
 
-    /* Meshes. */
+    /* Meshes (with material references). */
     if (!buf_puts(&js, "\"meshes\":["))
         goto oom;
-    for (size_t mi = 0; mi < mesh_count; mi++) {
-        /* Accessor indices: per mesh, 3 accessors in order
-         * (POSITION, NORMAL, indices). */
-        size_t a_pos = mi * 3, a_nrm = mi * 3 + 1, a_idx = mi * 3 + 2;
-        if (!buf_putf(&js,
-                      "%s{\"primitives\":[{\"attributes\":{"
-                      "\"POSITION\":%zu,\"NORMAL\":%zu},"
-                      "\"indices\":%zu,\"mode\":4}]}",
-                      mi ? "," : "", a_pos, a_nrm, a_idx))
+    {
+        /* Remap object material index -> export material index (only
+         * materials actually referenced are emitted). */
+        int *mat_map = malloc(scene->material_count *
+                              sizeof(int) + sizeof(int));
+        if (!mat_map)
             goto oom;
+        for (size_t m2 = 0; m2 < scene->material_count; m2++)
+            mat_map[m2] = -1;
+        int mat_out_count = 0;
+        for (size_t mi = 0; mi < mesh_count; mi++)
+            if (blocks[mi].material >= 0 &&
+                mat_map[blocks[mi].material] < 0)
+                mat_map[blocks[mi].material] = mat_out_count++;
+        (void)mat_out_count;
+
+        for (size_t mi = 0; mi < mesh_count; mi++) {
+            const mesh_blocks *b = &blocks[mi];
+            buf attrs = { 0 };
+            bool a_ok =
+                buf_putf(&attrs, "\"POSITION\":%zu,\"NORMAL\":%zu",
+                         b->a_pos, b->a_nrm) &&
+                (!b->has_uv ||
+                 buf_putf(&attrs, ",\"TEXCOORD_0\":%zu", b->a_uv)) &&
+                buf_put(&attrs, "\0", 1); /* %s needs a C string */
+            if (a_ok)
+                a_ok = buf_putf(&js,
+                                "%s{\"primitives\":[{"
+                                "\"attributes\":{%s},"
+                                "\"indices\":%zu,\"mode\":4",
+                                mi ? "," : "", attrs.data ? attrs.data
+                                                          : "",
+                                b->a_idx);
+            free(attrs.data);
+            if (!a_ok)
+                goto oom;
+            if (b->material >= 0 && mat_map[b->material] >= 0)
+                if (!buf_putf(&js, ",\"material\":%d",
+                              mat_map[b->material]))
+                    goto oom;
+            if (!buf_puts(&js, "}]}"))
+                goto oom;
+        }
+        free(mat_map);
     }
     if (!buf_puts(&js, "],"))
         goto oom;
 
-    /* Accessors + bufferViews: block offsets/lengths from pass 1. */
+    /* Accessors + bufferViews (4 slots per mesh; UV slots valid only
+     * when the mesh has UVs). */
     if (!buf_puts(&js, "\"accessors\":["))
         goto oom;
     for (size_t mi = 0; mi < mesh_count; mi++) {
@@ -397,7 +505,7 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                       "\"count\":%zu,\"type\":\"VEC3\","
                       "\"min\":[%.9g,%.9g,%.9g],"
                       "\"max\":[%.9g,%.9g,%.9g]}",
-                      mi ? "," : "", mi * 3, b->vert_count,
+                      mi ? "," : "", b->v_pos, b->vert_count,
                       (double)b->bmin.x, (double)b->bmin.y,
                       (double)b->bmin.z, (double)b->bmax.x,
                       (double)b->bmax.y, (double)b->bmax.z))
@@ -405,12 +513,18 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
         if (!buf_putf(&js,
                       ",{\"bufferView\":%zu,\"componentType\":5126,"
                       "\"count\":%zu,\"type\":\"VEC3\"}",
-                      mi * 3 + 1, b->vert_count))
+                      b->v_nrm, b->vert_count))
+            goto oom;
+        if (b->has_uv &&
+            !buf_putf(&js,
+                      ",{\"bufferView\":%zu,\"componentType\":5126,"
+                      "\"count\":%zu,\"type\":\"VEC2\"}",
+                      b->v_uv, b->vert_count))
             goto oom;
         if (!buf_putf(&js,
                       ",{\"bufferView\":%zu,\"componentType\":5125,"
                       "\"count\":%zu,\"type\":\"SCALAR\"}",
-                      mi * 3 + 2, b->tri_count * 3))
+                      b->v_idx, b->tri_count * 3))
             goto oom;
     }
     if (!buf_puts(&js, "],\"bufferViews\":["))
@@ -421,65 +535,185 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                       "%s{\"buffer\":0,\"byteOffset\":%zu,"
                       "\"byteLength\":%zu},"
                       "{\"buffer\":0,\"byteOffset\":%zu,"
-                      "\"byteLength\":%zu},"
-                      "{\"buffer\":0,\"byteOffset\":%zu,"
                       "\"byteLength\":%zu}",
-                      mi ? "," : "", b->pos_off,
-                      b->vert_count * 12, b->nrm_off, b->vert_count * 12,
+                      mi ? "," : "", b->pos_off, b->vert_count * 12,
+                      b->nrm_off, b->vert_count * 12))
+            goto oom;
+        if (b->has_uv &&
+            !buf_putf(&js,
+                      ",{\"buffer\":0,\"byteOffset\":%zu,"
+                      "\"byteLength\":%zu}",
+                      b->uv_off, b->vert_count * 8))
+            goto oom;
+        if (!buf_putf(&js,
+                      ",{\"buffer\":0,\"byteOffset\":%zu,"
+                      "\"byteLength\":%zu}",
                       b->idx_off, b->tri_count * 3 * 4))
             goto oom;
     }
-    if (!buf_putf(&js, "],\"buffers\":[{\"byteLength\":%zu}]}", bin.len))
+    /* Image bufferViews follow the mesh slots. */
+    {
+        size_t mesh_views = mesh_count * 3;
+        for (size_t k = 0; k < image_out_count; k++)
+            if (!buf_putf(&js,
+                          ",{\"buffer\":0,\"byteOffset\":%zu,"
+                          "\"byteLength\":%zu}",
+                          images_out[k].bin_off,
+                          images_out[k].bin_len)) {
+                (void)mesh_views;
+                goto oom;
+            }
+    }
+    if (!buf_putf(&js, "],\"buffers\":[{\"byteLength\":%zu}]",
+                  bin.len))
         goto oom;
 
-    /* Pass 3: write the GLB. */
-    size_t json_len = js.len;
-    size_t json_pad = (4 - json_len % 4) % 4;
-    size_t bin_pad = (4 - bin.len % 4) % 4;
-    size_t total = 12 + 8 + json_len + json_pad + (bin.len ? 8 + bin.len + bin_pad : 0);
+    /* Materials, textures, samplers, images. */
+    if (scene->material_count > 0) {
+        if (!buf_puts(&js, ",\"materials\":["))
+            goto oom;
+        bool mfirst = true;
+        for (size_t m2 = 0; m2 < scene->material_count; m2++) {
+            /* Only materials referenced by an exported mesh. */
+            bool used = false;
+            for (size_t mi = 0; mi < mesh_count; mi++)
+                if (blocks[mi].material == (int)m2)
+                    used = true;
+            if (!used)
+                continue;
+            const hal_material *mat = &scene->materials[m2];
+            int tex_idx = -1;
+            if (mat->texture >= 0) {
+                for (size_t k = 0; k < image_out_count; k++)
+                    if (images_out[k].scene_index == mat->texture)
+                        tex_idx = (int)k;
+            }
+            if (!buf_putf(&js,
+                          "%s{\"name\":", mfirst ? "" : ","))
+                goto oom;
+            if (!buf_put_json_str(&js, mat->name))
+                goto oom;
+            if (!buf_putf(&js,
+                          ",\"pbrMetallicRoughness\":{"
+                          "\"baseColorFactor\":[%.9g,%.9g,%.9g,%"
+                          ".9g],\"metallicFactor\":%.9g,"
+                          "\"roughnessFactor\":%.9g",
+                          (double)mat->base_color.r,
+                          (double)mat->base_color.g,
+                          (double)mat->base_color.b,
+                          (double)mat->base_color.a,
+                          (double)mat->metallic,
+                          (double)mat->roughness))
+                goto oom;
+            if (tex_idx >= 0)
+                if (!buf_putf(&js, ",\"baseColorTexture\":{\"index\":"
+                                   "%d}",
+                              tex_idx))
+                    goto oom;
+            if (!buf_putf(&js, "},\"emissiveFactor\":[%.9g,%.9g,%.9g]",
+                          (double)(mat->emissive.x *
+                                   mat->emissive_strength),
+                          (double)(mat->emissive.y *
+                                   mat->emissive_strength),
+                          (double)(mat->emissive.z *
+                                   mat->emissive_strength)))
+                goto oom;
+            if (!buf_puts(&js, "}"))
+                goto oom;
+            mfirst = false;
+        }
+        if (!buf_puts(&js, "]"))
+            goto oom;
 
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        io_err(err, err_cap, "cannot write %s", path);
+        if (image_out_count > 0) {
+            if (!buf_puts(&js, ",\"textures\":["))
+                goto oom;
+            for (size_t k = 0; k < image_out_count; k++)
+                if (!buf_putf(&js, "%s{\"sampler\":0,\"source\":%zu}",
+                              k ? "," : "", k))
+                    goto oom;
+            if (!buf_puts(&js, "],\"samplers\":[{\"magFilter\":9729,"
+                               "\"minFilter\":9987,\"wrapS\":33071,"
+                               "\"wrapT\":33071}],\"images\":["))
+                goto oom;
+            for (size_t k = 0; k < image_out_count; k++) {
+                const char *ipath =
+                    hal_scene_image(scene, images_out[k].scene_index);
+                const char *mime = "image/png";
+                size_t plen = strlen(ipath ? ipath : "");
+                if (plen > 4) {
+                    if (strcmp(ipath + plen - 4, ".jpg") == 0 ||
+                        (plen > 5 &&
+                         strcmp(ipath + plen - 5, ".jpeg") == 0))
+                        mime = "image/jpeg";
+                }
+                size_t view = mesh_count * 3 + k;
+                if (!buf_putf(&js,
+                              "%s{\"bufferView\":%zu,\"mimeType\":"
+                              "\"%s\"}",
+                              k ? "," : "", view, mime))
+                    goto oom;
+            }
+            if (!buf_puts(&js, "]"))
+                goto oom;
+        }
+    }
+    if (!buf_puts(&js, "}"))
+        goto oom;
+
+    /* Pass 3: the GLB container. */
+    {
+        size_t json_len = js.len;
+        size_t json_pad = (4 - json_len % 4) % 4;
+        size_t bin_pad = (4 - bin.len % 4) % 4;
+        size_t total =
+            12 + 8 + json_len + json_pad +
+            (bin.len ? 8 + bin.len + bin_pad : 0);
+
+        FILE *f = fopen(path, "wb");
+        if (!f) {
+            io_err(err, err_cap, "cannot write %s", path);
+            free(bin.data);
+            free(js.data);
+            free(blocks);
+            free(images_out);
+            return HAL_ERR_IO;
+        }
+        bool ok = true;
+        hal_u32 header[3] = { 0x46546C67u, 2u, (hal_u32)total };
+        ok = ok && fwrite(header, sizeof(header), 1, f) == 1;
+        hal_u32 json_hdr[2] = { (hal_u32)(json_len + json_pad),
+                                0x4E4F534Au };
+        ok = ok && fwrite(json_hdr, sizeof(json_hdr), 1, f) == 1;
+        ok = ok && fwrite(js.data, 1, js.len, f) == js.len;
+        for (size_t i = 0; ok && i < json_pad; i++)
+            ok = fputc(' ', f) != EOF;
+        if (bin.len) {
+            hal_u32 bin_hdr[2] = { (hal_u32)(bin.len + bin_pad),
+                                   0x004E4942u };
+            ok = ok && fwrite(bin_hdr, sizeof(bin_hdr), 1, f) == 1;
+            ok = ok && fwrite(bin.data, 1, bin.len, f) == bin.len;
+            for (size_t i = 0; ok && i < bin_pad; i++)
+                ok = fputc(0, f) != EOF;
+        }
+        if (fclose(f) != 0)
+            ok = false;
         free(bin.data);
         free(js.data);
         free(blocks);
-        return HAL_ERR_IO;
+        free(images_out);
+        if (!ok) {
+            io_err(err, err_cap, "write failed");
+            return HAL_ERR_IO;
+        }
+        return HAL_OK;
     }
-
-    bool ok = true;
-    hal_u32 header[3] = { 0x46546C67u, 2u, (hal_u32)total };
-    ok = ok && fwrite(header, sizeof(header), 1, f) == 1;
-
-    hal_u32 json_hdr[2] = { (hal_u32)(json_len + json_pad), 0x4E4F534Au };
-    ok = ok && fwrite(json_hdr, sizeof(json_hdr), 1, f) == 1;
-    ok = ok && fwrite(js.data, 1, js.len, f) == js.len;
-    for (size_t i = 0; ok && i < json_pad; i++)
-        ok = fputc(' ', f) != EOF;
-
-    if (bin.len) {
-        hal_u32 bin_hdr[2] = { (hal_u32)(bin.len + bin_pad), 0x004E4942u };
-        ok = ok && fwrite(bin_hdr, sizeof(bin_hdr), 1, f) == 1;
-        ok = ok && fwrite(bin.data, 1, bin.len, f) == bin.len;
-        for (size_t i = 0; ok && i < bin_pad; i++)
-            ok = fputc(0, f) != EOF;
-    }
-
-    if (fclose(f) != 0)
-        ok = false;
-    free(bin.data);
-    free(js.data);
-    free(blocks);
-    if (!ok) {
-        io_err(err, err_cap, "write failed");
-        return HAL_ERR_IO;
-    }
-    return HAL_OK;
 
 oom:
     free(bin.data);
     free(js.data);
     free(blocks);
+    free(images_out);
     io_err(err, err_cap, "out of memory");
     return HAL_ERR_OUT_OF_MEMORY;
 }

@@ -122,6 +122,10 @@ void hal__widget_measure(hal_widget *w) {
     case HAL_WIDGET_TREE:
         hal__tree_measure(w);
         break;
+    case HAL_WIDGET_UVVIEW:
+        w->measured.width = 160.0f;
+        w->measured.height = 160.0f; /* square-ish editor */
+        break;
     case HAL_WIDGET_MENUBAR: {
         hal_f32 width = 0.0f;
         for (hal_widget *c = w->first_child; c; c = c->next)

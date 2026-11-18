@@ -44,12 +44,12 @@
 
 ## Current state
 
-**M0–M5 complete** (2026-11-18). M5 = mesh modeling (edit mode, all
-operators, gizmo, undoable) + export/import (glTF 2.0 GLB, OBJ, STL;
-glTF/OBJ import, round-trip tested). Next up: M6 materials & UVs (PBR
-materials, texture slots, unwrap, UV editor; extend the glTF export
-with materials), then M7 rigging. Resume from src/ui/ (UV editor
-widget) and src/core/material.*.
+**M0–M6 complete** (2026-11-18). M6 = PBR-style materials + texture
+slots, UV unwrap (planar/box/smart-lite), the UV editor widget, glTF
+export with materials/UVs/embedded textures, project format v3. Next:
+M7 rigging (armatures, bones, parenting, auto weights, weight paint,
+simple IK; skins in the glTF export), then M8 animation. Resume from
+src/core/ (new bone/armature structures) and src/io/gltf.c (skins).
 
 ### Implemented and tested
 
@@ -259,6 +259,37 @@ widget) and src/core/material.*.
 - Materials and UVs are NOT in the exporters yet (they arrive with
   M6, per the revised roadmap).
 
+### Implemented and tested — M6: materials & UVs (2026-11-18)
+
+- Materials (src/core/material.h/c): glTF metallic-roughness model —
+  base color, metallic, roughness, emissive + strength, one texture
+  slot — owned by the scene, referenced per object; scene image list
+  (file paths).
+- Per-corner (per-loop) UV storage on the mesh, grown with the loops
+  and carried through face compaction (merge/delete/subdivide keep
+  UVs aligned); uvs_valid marks unwrapped meshes.
+- Unwrap operators (src/core/uv.h/c): planar (X/Y/Z), box (dominant-
+  normal axis groups in a 3x2 grid), smart-lite (normal-similarity
+  islands via BFS, dominant-axis projection, row packing) — all as
+  undoable mesh operations on the Edit menu.
+- UV editor widget (src/ui/uvview.c): bound to the selected object's
+  mesh, draws the UV grid, face loops and selected faces; lives in
+  the sidebar.
+- Material panel: base-color entries + metallic/roughness sliders
+  bound to the object's material; New Material on the Edit menu. The
+  viewport shades objects with their material base color + emissive
+  lift.
+- glTF export: materials (baseColorFactor, metallic/roughness
+  factors, emissiveFactor, baseColorTexture), TEXCOORD_0 per-corner
+  streams (per-corner duplication forced when UVs exist), embedded
+  image textures (bytes + mimeType + bufferView + sampler). Project
+  format v3 saves materials/images (v1/v2 files still load).
+- Tests: test_material (818 checks — material/v3 round trip, unwrap
+  ranges + box cell seams, UV editor paint, GLB JSON carrying the
+  material and UVs). Fixed along the way: the material header parse
+  order, and a heap overflow where a non-NUL-terminated build buffer
+  reached %s (ASan).
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -266,6 +297,12 @@ widget) and src/core/material.*.
   refinement. Bevel handles single manifold edges only (vertex
   bevels out of scope). glTF import flattens node hierarchies into
   world transforms (parenting is baked; geometry exact).
+- Viewport texture SAMPLING is not implemented (materials shade by
+  base color + emissive; textures are authored, previewed in the UV
+  editor, and exported). glTF import ignores materials/textures.
+  Smart unwrap is projection-based (documented in uv.h), not
+  angle-based flattening. Geometry created after an unwrap carries
+  (0,0) UVs until re-unwrapped.
 - The move gizmo drags along world axes only; screen-plane drag and
   rotate/scale gizmos are future polish (R/S modal covers them).
 
@@ -299,6 +336,10 @@ widget) and src/core/material.*.
 
 ## Log
 
+- **2026-11-18 — M6 complete.** Materials + texture slots, per-corner
+  UVs with compaction-safe storage, three unwraps, the UV editor,
+  glTF materials/UVs/embedded textures, format v3. 1784 headless
+  checks total (818 new).
 - **2026-11-18 — M5 complete.** glTF 2.0/GLB + OBJ + STL export,
   glTF + OBJ import, round-trip tested (1024 headless checks total).
 - **2026-11-18 — M4 complete.** Mesh modeling: selection, picking,

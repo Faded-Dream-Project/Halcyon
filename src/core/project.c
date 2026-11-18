@@ -65,6 +65,29 @@ hal_result hal_project_save(const hal_scene *scene, const char *path,
     ok = ok && fprintf(f, "halcyon %d\n", HAL_PROJECT_FORMAT_VERSION) > 0;
     ok = ok && fprintf(f, "scene \"%s\"\n", scene->name) > 0;
 
+    for (size_t mi = 0; ok && mi < scene->material_count; mi++) {
+        const hal_material *mat = &scene->materials[mi];
+        ok = ok && fprintf(f, "material %d \"%s\"\n", (int)mi,
+                           mat->name) > 0;
+        ok = ok && fprintf(f, "  color %.9g %.9g %.9g %.9g\n",
+                           (double)mat->base_color.r,
+                           (double)mat->base_color.g,
+                           (double)mat->base_color.b,
+                           (double)mat->base_color.a) > 0;
+        ok = ok && fprintf(f, "  mr %.9g %.9g\n",
+                           (double)mat->metallic,
+                           (double)mat->roughness) > 0;
+        ok = ok && fprintf(f, "  emissive %.9g %.9g %.9g %.9g\n",
+                           (double)mat->emissive.x,
+                           (double)mat->emissive.y,
+                           (double)mat->emissive.z,
+                           (double)mat->emissive_strength) > 0;
+        ok = ok && fprintf(f, "  texture %d\n", mat->texture) > 0;
+        ok = ok && fprintf(f, "end\n") > 0;
+    }
+    for (size_t ii = 0; ok && ii < scene->image_count; ii++)
+        ok = ok && fprintf(f, "image \"%s\"\n", scene->images[ii]) > 0;
+
     for (size_t i = 0; ok && i < scene->count; i++) {
         const hal_object *o = &scene->objects[i];
         ok = ok && fprintf(f, "object %u \"%s\" %s\n", (unsigned)o->id,
@@ -85,6 +108,8 @@ hal_result hal_project_save(const hal_scene *scene, const char *path,
                             !o->smooth_shading)
                                ? " -"
                                : "") > 0;
+        if (o->material >= 0)
+            ok = ok && fprintf(f, "  mat %d\n", o->material) > 0;
         if (o->mesh) {
             const hal_mesh *mm = o->mesh;
             ok = ok && fprintf(f, "  mesh %zu %zu %zu\n", mm->vert_count,
@@ -543,6 +568,25 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 }
             }
             consume_line(&p);
+        } else if (strcmp(key, "mat") == 0) {
+            hal_object *obj = hal_scene_object(scene, current);
+            if (!obj) {
+                set_err(err, err_cap,
+                        "line %d: 'mat' outside an object block", line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            hal_u32 mat = 0;
+            if (!parse_u32(&p, &mat) || !expect_end_of_line(&p)) {
+                set_err(err, err_cap,
+                        "line %d: mat wants one index", line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            obj->material = (int)mat;
+            consume_line(&p);
         } else if (strcmp(key, "mesh") == 0 ||
                    strcmp(key, "v") == 0 || strcmp(key, "e") == 0 ||
                    strcmp(key, "f") == 0) {
@@ -642,6 +686,130 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 }
             }
             consume_line(&p);
+        } else if (strcmp(key, "material") == 0) {
+            /* material <index> "<name>" */
+            hal_u32 idx = 0;
+            bool ok_line = parse_u32(&p, &idx);
+            char *name = ok_line ? parse_quoted(&p) : NULL;
+            ok_line = ok_line && name != NULL && expect_end_of_line(&p);
+            if (!ok_line) {
+                set_err(err, err_cap,
+                        "line %d: material wants: index \"name\"", line_no);
+                free(name);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            consume_line(&p);
+            /* Sub-lines until 'end'. */
+            hal_material mat = hal_material_default();
+            snprintf(mat.name, sizeof(mat.name), "%s", name);
+            free(name);
+            mat.texture = -1;
+            bool done_block = false;
+            while (!done_block && result == HAL_OK) {
+                skip_spaces(&p);
+                if (parser_peek(&p) == -1)
+                    break;
+                if (parser_peek(&p) == '\n') {
+                    parser_next(&p);
+                    continue;
+                }
+                int mline = p.line;
+                char *mkey = parse_word(&p);
+                if (!mkey) {
+                    set_err(err, err_cap, "line %d: expected a key",
+                            mline);
+                    result = HAL_ERR_INVALID_ARGUMENT;
+                    goto done;
+                }
+                if (strcmp(mkey, "color") == 0) {
+                    hal_f32 r, g, b, a;
+                    if (!parse_float(&p, &r) || !parse_float(&p, &g) ||
+                        !parse_float(&p, &b) || !parse_float(&p, &a) ||
+                        !expect_end_of_line(&p)) {
+                        set_err(err, err_cap,
+                                "line %d: color wants four numbers",
+                                mline);
+                        result = HAL_ERR_INVALID_ARGUMENT;
+                        free(mkey);
+                        goto done;
+                    }
+                    mat.base_color = hal_color_rgba(r, g, b, a);
+                } else if (strcmp(mkey, "mr") == 0) {
+                    hal_f32 met, rou;
+                    if (!parse_float(&p, &met) ||
+                        !parse_float(&p, &rou) || !expect_end_of_line(&p)) {
+                        set_err(err, err_cap,
+                                "line %d: mr wants two numbers", mline);
+                        result = HAL_ERR_INVALID_ARGUMENT;
+                        free(mkey);
+                        goto done;
+                    }
+                    mat.metallic = met;
+                    mat.roughness = rou;
+                } else if (strcmp(mkey, "emissive") == 0) {
+                    hal_f32 x, y, z, s;
+                    if (!parse_float(&p, &x) || !parse_float(&p, &y) ||
+                        !parse_float(&p, &z) || !parse_float(&p, &s) ||
+                        !expect_end_of_line(&p)) {
+                        set_err(err, err_cap,
+                                "line %d: emissive wants four numbers",
+                                mline);
+                        result = HAL_ERR_INVALID_ARGUMENT;
+                        free(mkey);
+                        goto done;
+                    }
+                    mat.emissive = hal_vec3f_make(x, y, z);
+                    mat.emissive_strength = s;
+                } else if (strcmp(mkey, "texture") == 0) {
+                    hal_u32 tex = 0;
+                    if (!parse_u32(&p, &tex) || !expect_end_of_line(&p)) {
+                        set_err(err, err_cap,
+                                "line %d: texture wants one index",
+                                mline);
+                        result = HAL_ERR_INVALID_ARGUMENT;
+                        free(mkey);
+                        goto done;
+                    }
+                    mat.texture = (int)tex;
+                } else if (strcmp(mkey, "end") == 0) {
+                    done_block = true;
+                } else {
+                    set_err(err, err_cap,
+                            "line %d: unknown material key '%s'", mline,
+                            mkey);
+                    result = HAL_ERR_INVALID_ARGUMENT;
+                    free(mkey);
+                    goto done;
+                }
+                free(mkey);
+                consume_line(&p);
+            }
+            if (hal_scene_material_add(scene, &mat) < 0) {
+                set_err(err, err_cap, "out of memory");
+                result = HAL_ERR_OUT_OF_MEMORY;
+                goto done;
+            }
+        } else if (strcmp(key, "image") == 0) {
+            char *img_path = parse_quoted(&p);
+            if (!img_path || !expect_end_of_line(&p)) {
+                set_err(err, err_cap,
+                        "line %d: image wants one quoted path", line_no);
+                free(img_path);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            consume_line(&p);
+            if (hal_scene_image_add(scene, img_path) < 0) {
+                free(img_path);
+                set_err(err, err_cap, "out of memory");
+                result = HAL_ERR_OUT_OF_MEMORY;
+                free(key);
+                goto done;
+            }
+            free(img_path);
         } else if (strcmp(key, "end") == 0) {
             if (current == HAL_OBJECT_ID_NONE) {
                 set_err(err, err_cap,

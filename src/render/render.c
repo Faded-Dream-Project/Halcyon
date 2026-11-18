@@ -3,6 +3,8 @@
  */
 
 #include "render.h"
+
+#include "../core/material.h"
 #include "raster.h"
 
 #include <math.h>
@@ -303,6 +305,28 @@ static void render_gizmo(hal_canvas *canvas, hal_rectf viewport,
 
 /* ---- The view ---- */
 
+/* The object's shaded base color: its material's base color (plus an
+ * emissive lift), or the theme default when unassigned. */
+static hal_color object_base_color(hal_scene *scene, hal_object *obj,
+                                   hal_color fallback) {
+    if (obj->material < 0)
+        return fallback;
+    hal_material *mat = hal_scene_material(scene, obj->material);
+    if (!mat)
+        return fallback;
+    hal_color c = mat->base_color;
+    hal_f32 e = mat->emissive_strength;
+    if (e > 0.0f) {
+        c.r += mat->emissive.x * e;
+        c.g += mat->emissive.y * e;
+        c.b += mat->emissive.z * e;
+        if (c.r > 1.0f) c.r = 1.0f;
+        if (c.g > 1.0f) c.g = 1.0f;
+        if (c.b > 1.0f) c.b = 1.0f;
+    }
+    return c;
+}
+
 void hal_render_view(hal_raster *raster, hal_scene *scene,
                      hal_camera *cam, hal_canvas *canvas,
                      hal_rectf viewport, const hal_render_opts *opts) {
@@ -359,11 +383,13 @@ void hal_render_view(hal_raster *raster, hal_scene *scene,
 
         if (opts->shading == HAL_SHADING_WIREFRAME) {
             render_mesh_wire(raster, obj->mesh, world, view_proj, ox, oy,
-                             vw, vh, opts->object);
+                             vw, vh,
+                             object_base_color(scene, obj, opts->object));
         } else {
             render_mesh_solid(raster, obj->mesh, world, view_proj,
                               hal_camera_eye(cam), obj->smooth_shading,
-                              ox, oy, vw, vh, opts->object);
+                              ox, oy, vw, vh,
+                              object_base_color(scene, obj, opts->object));
         }
     }
 

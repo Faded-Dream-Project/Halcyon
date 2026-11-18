@@ -105,6 +105,14 @@ hal_mesh *hal_mesh_clone(const hal_mesh *src) {
             memcpy(m->face_sel, src->face_sel, src->face_count);
         m->face_sel_cap = src->face_count;
     }
+    if (src->uvs && src->loop_count) {
+        m->uvs = malloc(src->loop_count * sizeof(hal_vec2f));
+        if (!m->uvs)
+            goto fail;
+        memcpy(m->uvs, src->uvs, src->loop_count * sizeof(hal_vec2f));
+        m->uv_cap = src->loop_count;
+        m->uvs_valid = src->uvs_valid;
+    }
     return m;
 
 fail:
@@ -220,10 +228,17 @@ static bool compact_faces(hal_mesh *m, const bool *keep) {
                                 sizeof(hal_u32));
     size_t *new_off = malloc((kept + 1) * sizeof(size_t));
     hal_u8 *new_sel = calloc(kept ? kept : 1, 1);
-    if (!new_loops || !new_off || !new_sel) {
+    /* UVs are loop-indexed: they must follow the kept loops or they
+     * would silently desync after merge/delete/subdivide. */
+    hal_vec2f *new_uvs =
+        m->uvs ? malloc((m->loop_count ? m->loop_count : 1) *
+                        sizeof(hal_vec2f))
+               : NULL;
+    if (!new_loops || !new_off || !new_sel || (m->uvs && !new_uvs)) {
         free(new_loops);
         free(new_off);
         free(new_sel);
+        free(new_uvs);
         return false;
     }
 
@@ -232,8 +247,12 @@ static bool compact_faces(hal_mesh *m, const bool *keep) {
     for (size_t f = 0; f < m->face_count; f++) {
         if (!keep[f])
             continue;
-        for (size_t i = 0; i < face_len(m, f); i++)
-            new_loops[nl++] = face_vert(m, f, i);
+        for (size_t i = 0; i < face_len(m, f); i++) {
+            new_loops[nl] = face_vert(m, f, i);
+            if (new_uvs)
+                new_uvs[nl] = m->uvs[m->face_off[f] + i];
+            nl++;
+        }
         new_sel[nf] = m->face_sel ? m->face_sel[f] : 0;
         nf++;
         new_off[nf] = nl;
@@ -248,6 +267,11 @@ static bool compact_faces(hal_mesh *m, const bool *keep) {
     m->face_count = m->face_cap = nf;
     m->face_sel = new_sel;
     m->face_sel_cap = kept;
+    if (m->uvs) {
+        free(m->uvs);
+        m->uvs = new_uvs;
+        m->uv_cap = m->loop_count;
+    }
     hal_mesh_invalidate_derived(m);
     return true;
 }

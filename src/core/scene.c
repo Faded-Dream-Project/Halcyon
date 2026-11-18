@@ -30,6 +30,10 @@ hal_scene *hal_scene_create(const char *name) {
         return NULL;
     }
     scene->next_id = 1; /* 0 is HAL_OBJECT_ID_NONE */
+    scene->materials = NULL;
+    scene->material_count = 0;
+    scene->images = NULL;
+    scene->image_count = 0;
     return scene;
 }
 
@@ -41,6 +45,10 @@ void hal_scene_destroy(hal_scene *scene) {
         free(scene->objects[i].name);
     }
     free(scene->objects);
+    free(scene->materials);
+    for (size_t i = 0; i < scene->image_count; i++)
+        free(scene->images[i]);
+    free(scene->images);
     free(scene->name);
     free(scene);
 }
@@ -87,6 +95,7 @@ hal_object_id hal_scene_object_add(hal_scene *scene, const char *name,
     slot->name = owned_name;
     slot->type = type;
     slot->mesh = NULL;
+    slot->material = -1;
     slot->location = hal_vec3f_zero();
     slot->rotation = hal_quatf_identity();
     slot->scale = hal_vec3f_one();
