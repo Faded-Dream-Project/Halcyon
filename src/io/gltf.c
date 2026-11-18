@@ -17,6 +17,7 @@
 
 #include "io.h"
 
+#include "../core/anim.h"
 #include "../core/material.h"
 #include "../core/mesh_ops.h"
 
@@ -494,6 +495,142 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
     if (!buf_puts(&js, "],"))
         goto oom;
 
+    /* Animations (pass 1.5): bake every clip at 30 fps into the BIN
+     * buffer (LINEAR samplers; in-app easing bakes into the samples)
+     * and collect the channels/samplers JSON + the accessor data the
+     * sections below append. */
+    size_t mesh_acc_count = 0;
+    for (size_t mi = 0; mi < mesh_count; mi++)
+        mesh_acc_count += blocks[mi].has_uv ? 4 : 3;
+    typedef struct sampler_block {
+        size_t in_off, out_off, frames;
+        int comps;
+    } sampler_block;
+    sampler_block *anim_samplers = NULL;
+    size_t anim_sampler_count = 0;
+    buf anims_json = { 0 };
+    if (scene->clip_count > 0) {
+        if (!buf_puts(&anims_json, ",\"animations\":["))
+            goto oom;
+        for (size_t ci = 0; ci < scene->clip_count; ci++) {
+            const hal_clip *clip = &scene->clips[ci];
+            if (ci && !buf_puts(&anims_json, ","))
+                goto oom;
+            if (!buf_puts(&anims_json, "{\"name\":"))
+                goto oom;
+            if (!buf_put_json_str(&anims_json, clip->name))
+                goto oom;
+
+            hal_f32 span = clip->end - clip->start;
+            if (span < 1e-4f)
+                span = 1.0f / 30.0f;
+            size_t frames = (size_t)(span * 30.0f) + 1;
+            if (frames < 2)
+                frames = 2;
+            if (frames > 100000)
+                frames = 100000;
+
+            bool first_ch = true;
+            size_t clip_first_sampler = anim_sampler_count;
+            if (!buf_puts(&anims_json, ",\"channels\":["))
+                goto oom;
+            for (size_t oi = 0; oi < scene->count; oi++) {
+                const hal_object *o = &scene->objects[oi];
+                bool has = false;
+                for (size_t c = 0; c < clip->count; c++)
+                    if (clip->channels[c].object == o->id &&
+                        clip->channels[c].type != HAL_CH_BONE)
+                        has = true;
+                if (!has)
+                    continue;
+
+                hal_vec3f loc = o->location;
+                hal_quatf rot = o->rotation;
+                hal_vec3f scale = o->scale;
+                int mask = hal_clip_sample_object(
+                    clip, o->id, clip->start, &loc, &rot, &scale);
+                const struct {
+                    const char *path;
+                    int mask_bit;
+                    int comps;
+                } paths[3] = {
+                    { "translation", 1, 3 },
+                    { "rotation", 2, 4 },
+                    { "scale", 4, 3 },
+                };
+                for (int p = 0; p < 3; p++) {
+                    if (!(mask & paths[p].mask_bit))
+                        continue;
+                    while (bin.len % 4 != 0)
+                        if (!buf_put(&bin, "\0", 1))
+                            goto oom;
+                    size_t in_off = bin.len;
+                    for (size_t f2 = 0; f2 < frames; f2++) {
+                        hal_f32 t = clip->start +
+                                    (hal_f32)f2 /
+                                        (hal_f32)(frames - 1) * span;
+                        if (!buf_put(&bin, &t, sizeof(hal_f32)))
+                            goto oom;
+                    }
+                    size_t out_off = bin.len;
+                    for (size_t f2 = 0; f2 < frames; f2++) {
+                        hal_f32 t = clip->start +
+                                    (hal_f32)f2 /
+                                        (hal_f32)(frames - 1) * span;
+                        hal_vec3f l = o->location;
+                        hal_quatf r = o->rotation;
+                        hal_vec3f sc = o->scale;
+                        hal_clip_sample_object(clip, o->id, t, &l, &r,
+                                               &sc);
+                        if (paths[p].comps == 3) {
+                            hal_vec3f v = p == 0 ? l : sc;
+                            if (!buf_put(&bin, &v, sizeof(v)))
+                                goto oom;
+                        } else if (!buf_put(&bin, &r, sizeof(r))) {
+                            goto oom;
+                        }
+                    }
+                    sampler_block *grown = realloc(
+                        anim_samplers,
+                        (anim_sampler_count + 1) * sizeof(*grown));
+                    if (!grown)
+                        goto oom;
+                    anim_samplers = grown;
+                    anim_samplers[anim_sampler_count].in_off = in_off;
+                    anim_samplers[anim_sampler_count].out_off = out_off;
+                    anim_samplers[anim_sampler_count].frames = frames;
+                    anim_samplers[anim_sampler_count].comps =
+                        paths[p].comps;
+                    if (!buf_putf(&anims_json,
+                                  "%s{\"sampler\":%zu,"
+                                  "\"target\":{\"node\":%zu,"
+                                  "\"path\":\"%s\"}}",
+                                  first_ch ? "" : ",", anim_sampler_count,
+                                  oi, paths[p].path))
+                        goto oom;
+                    first_ch = false;
+                    anim_sampler_count++;
+                }
+            }
+            if (!buf_puts(&anims_json, "],\"samplers\":["))
+                goto oom;
+            for (size_t k = clip_first_sampler; k < anim_sampler_count;
+                 k++) {
+                size_t acc_in = mesh_acc_count + k * 2;
+                if (!buf_putf(&anims_json,
+                              "%s{\"input\":%zu,\"output\":%zu,"
+                              "\"interpolation\":\"LINEAR\"}",
+                              k > clip_first_sampler ? "," : "",
+                              acc_in, acc_in + 1))
+                    goto oom;
+            }
+            if (!buf_puts(&anims_json, "]}"))
+                goto oom;
+        }
+        if (!buf_puts(&anims_json, "]"))
+            goto oom;
+    }
+
     /* Accessors + bufferViews (4 slots per mesh; UV slots valid only
      * when the mesh has UVs). */
     if (!buf_puts(&js, "\"accessors\":["))
@@ -525,6 +662,18 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                       ",{\"bufferView\":%zu,\"componentType\":5125,"
                       "\"count\":%zu,\"type\":\"SCALAR\"}",
                       b->v_idx, b->tri_count * 3))
+            goto oom;
+    }
+    for (size_t k = 0; k < anim_sampler_count; k++) {
+        const sampler_block *sb = &anim_samplers[k];
+        size_t view_in = mesh_acc_count + k * 2;
+        if (!buf_putf(&js,
+                      ",{\"bufferView\":%zu,\"componentType\":5126,"
+                      "\"count\":%zu,\"type\":\"SCALAR\"},"
+                      "{\"bufferView\":%zu,\"componentType\":5126,"
+                      "\"count\":%zu,\"type\":\"VEC%d\"}",
+                      view_in, sb->frames, view_in + 1, sb->frames,
+                      sb->comps))
             goto oom;
     }
     if (!buf_puts(&js, "],\"bufferViews\":["))
@@ -563,6 +712,17 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                 (void)mesh_views;
                 goto oom;
             }
+    }
+    for (size_t k = 0; k < anim_sampler_count; k++) {
+        const sampler_block *sb = &anim_samplers[k];
+        if (!buf_putf(&js,
+                      ",{\"buffer\":0,\"byteOffset\":%zu,"
+                      "\"byteLength\":%zu},"
+                      "{\"buffer\":0,\"byteOffset\":%zu,"
+                      "\"byteLength\":%zu}",
+                      sb->in_off, sb->frames * 4, sb->out_off,
+                      sb->frames * 4 * (size_t)sb->comps))
+            goto oom;
     }
     if (!buf_putf(&js, "],\"buffers\":[{\"byteLength\":%zu}]",
                   bin.len))
@@ -636,6 +796,9 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                                "\"minFilter\":9987,\"wrapS\":33071,"
                                "\"wrapT\":33071}],\"images\":["))
                 goto oom;
+            size_t mesh_view_total = 0;
+            for (size_t mi = 0; mi < mesh_count; mi++)
+                mesh_view_total += blocks[mi].has_uv ? 4 : 3;
             for (size_t k = 0; k < image_out_count; k++) {
                 const char *ipath =
                     hal_scene_image(scene, images_out[k].scene_index);
@@ -647,7 +810,7 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                          strcmp(ipath + plen - 5, ".jpeg") == 0))
                         mime = "image/jpeg";
                 }
-                size_t view = mesh_count * 3 + k;
+                size_t view = mesh_view_total + k;
                 if (!buf_putf(&js,
                               "%s{\"bufferView\":%zu,\"mimeType\":"
                               "\"%s\"}",
@@ -658,6 +821,12 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                 goto oom;
         }
     }
+    if (anims_json.len &&
+        !buf_put(&js, anims_json.data, anims_json.len))
+        goto oom;
+    free(anim_samplers);
+    free(anims_json.data);
+
     if (!buf_puts(&js, "}"))
         goto oom;
 
@@ -714,6 +883,8 @@ oom:
     free(js.data);
     free(blocks);
     free(images_out);
+    free(anim_samplers);
+    free(anims_json.data);
     io_err(err, err_cap, "out of memory");
     return HAL_ERR_OUT_OF_MEMORY;
 }

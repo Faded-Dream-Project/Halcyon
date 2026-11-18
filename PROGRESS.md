@@ -44,14 +44,14 @@
 
 ## Current state
 
-**M0–M7 complete** (2026-11-18). M7 = armatures (bones, chains, pose
-mode), automatic weights, skinning in the viewport, analytic 2-bone IK
-(tip-to-mouse), armature/bones/skin-weights in the project format.
-NOT done from M7's list: manual weight painting and glTF SKIN export
-(both recorded below as the first M8-session tasks, alongside the
-animation timeline). Next: M8 animation (timeline, keyframes, dope
-sheet, curve editor, playback, clips) + the glTF skin/animation
-export tail.
+**M0–M8 complete** (2026-11-18). M8 = animation clips with channels
+and per-key easing, the timeline/dope-sheet strip with scrubbing and
+playback (Space), Insert Key (I) for object TRS and posed bones, clip
+management, clips in the project format, and glTF 2.0 animation
+export (baked 30 fps LINEAR samplers — JSON validity verified with an
+independent parser). Still open from earlier milestones: manual
+weight painting, glTF SKIN export, the curve editor widget (see
+known issues). Next: M9 game-asset workflow, M10 preview render.
 
 ### Implemented and tested
 
@@ -323,6 +323,29 @@ export tail.
   local-vs-world lower-bone rotation, and an unsigned parse of the
   signed bone parent.
 
+### Implemented and tested — M8: animation (2026-11-18)
+
+- Clips (src/core/anim.h/c): channels per property (location XYZ,
+  rotation quat, scale XYZ, bone pose), sorted keys with per-key
+  easing (linear, smoothstep ease-in-out, step), quaternion slerp,
+  clamped or looping sampling, per-object evaluation for exporters.
+- Editor: Animation menu (New Clip, Insert Key, Play/Pause, Loop);
+  I inserts object TRS keys (or the posed bone's rotation); Space
+  plays; the timeline strip draws the ruler, one row of key dots per
+  channel (color-coded by path kind) and the playhead, click-scrubs,
+  playback advances in the frame loop with loop wrap. Clips persist
+  in the project format (channels, keys, range, loop).
+- glTF export: animations as baked 30 fps LINEAR sampler pairs
+  (in-app easing bakes into the samples) with correct accessor/
+  bufferView numbering after the mesh and image slots — the exported
+  JSON validated with an independent parser.
+- Tests: test_anim (50 checks — key insert/replace, linear/eased/step
+  sampling, quaternion midpoints, loop wrap semantics where end ==
+  start, bone channels, project round trip, glTF export contents and
+  re-import). Caught: two non-NUL-terminated buffer reads (ASan) and
+  the 180-degree quaternion path ambiguity (the test now pins an
+  unambiguous target; both arcs are legal halves).
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -330,11 +353,13 @@ export tail.
   refinement. Bevel handles single manifold edges only (vertex
   bevels out of scope). glTF import flattens node hierarchies into
   world transforms (parenting is baked; geometry exact).
-- M7 leftovers (first tasks of the next session): manual weight
-  PAINTING (auto weights exist; the brush UI does not) and glTF SKIN
-  export (bones/joints/weights; the armature stays a Halcyon-side
-  structure until then). IK assumes the chain root's parent is
-  unposed; the bone-rotate modal is world-Y only.
+- M7/M8 leftovers (first tasks of the next session): manual weight
+  PAINTING (auto weights exist; the brush UI does not), glTF SKIN
+  export (bones/joints/weights), and the CURVE EDITOR widget (the
+  timeline shows keys; curves are not yet drawn — easing is edited
+  per key in data only). IK assumes the chain root's parent is
+  unposed; the bone-rotate modal is world-Y only; animation export
+  bakes at 30 fps rather than exporting raw keys.
 - Viewport texture SAMPLING is not implemented (materials shade by
   base color + emissive; textures are authored, previewed in the UV
   editor, and exported). glTF import ignores materials/textures.
@@ -374,6 +399,10 @@ export tail.
 
 ## Log
 
+- **2026-11-18 — M8 complete.** Clips, channels, easing, slerp,
+  timeline + scrubbing + playback, Insert Key, clip persistence, glTF
+  animation export (baked, independently validated). 1925 headless
+  checks total (50 new).
 - **2026-11-18 — M7 complete.** Armatures with chain posing,
   automatic weights + skinning in the viewport, analytic 2-bone IK,
   pose mode with bone picking and rotation, armature persistence.

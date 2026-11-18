@@ -11,6 +11,7 @@
 
 #define HAL_PROJECT_FORMAT_VERSION 3
 
+#include "anim.h"
 #include "armature.h"
 
 #include <errno.h>
@@ -91,6 +92,37 @@ hal_result hal_project_save(const hal_scene *scene, const char *path,
     }
     for (size_t ii = 0; ok && ii < scene->image_count; ii++)
         ok = ok && fprintf(f, "image \"%s\"\n", scene->images[ii]) > 0;
+
+    for (size_t ci = 0; ok && ci < scene->clip_count; ci++) {
+        const hal_clip *clip = &scene->clips[ci];
+        ok = ok && fprintf(f, "clip %zu \"%s\"\n", ci, clip->name) > 0;
+        ok = ok && fprintf(f, "  range %.9g %.9g\n",
+                           (double)clip->start,
+                           (double)clip->end) > 0;
+        ok = ok && fprintf(f, "  loop %d\n", clip->loop ? 1 : 0) > 0;
+        for (size_t c = 0; ok && c < clip->count; c++) {
+            const hal_anim_channel *ch = &clip->channels[c];
+            ok = ok && fprintf(f, "  channel %d %u %d\n", (int)ch->type,
+                               (unsigned)ch->object, ch->bone) > 0;
+            for (size_t k = 0; ok && k < ch->count; k++) {
+                const hal_keyframe *key = &ch->keys[k];
+                ok = ok && fprintf(f, "  key %.9g"
+                                          " %.9g %.9g %.9g"
+                                          " %.9g %.9g %.9g %.9g %d\n",
+                                   (double)key->time,
+                                   (double)key->vec.x,
+                                   (double)key->vec.y,
+                                   (double)key->vec.z,
+                                   (double)key->rot.x,
+                                   (double)key->rot.y,
+                                   (double)key->rot.z,
+                                   (double)key->rot.w,
+                                   (int)key->interp) > 0;
+            }
+            ok = ok && fprintf(f, "  end\n") > 0;
+        }
+        ok = ok && fprintf(f, "end\n") > 0;
+    }
 
     for (size_t i = 0; ok && i < scene->count; i++) {
         const hal_object *o = &scene->objects[i];
@@ -384,6 +416,8 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
     hal_result result = HAL_OK;
     hal_scene *scene = NULL;
     hal_object_id current = HAL_OBJECT_ID_NONE;
+    hal_clip *cur_clip = NULL;
+    hal_anim_channel *cur_channel = NULL;
 
     /* --- header --- */
     {
@@ -1011,15 +1045,143 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 goto done;
             }
             free(img_path);
+        } else if (strcmp(key, "clip") == 0) {
+            hal_u32 idx = 0;
+            char *name = NULL;
+            bool ok_line = parse_u32(&p, &idx);
+            if (ok_line)
+                name = parse_quoted(&p);
+            ok_line = ok_line && name != NULL && expect_end_of_line(&p);
+            if (!ok_line) {
+                set_err(err, err_cap,
+                        "line %d: clip wants: index \"name\"", line_no);
+                free(name);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            consume_line(&p);
+            int added = hal_scene_clip_add(scene, name);
+            free(name);
+            cur_clip = added >= 0 ? hal_scene_clip(scene, added) : NULL;
+            cur_channel = NULL;
+        } else if (strcmp(key, "range") == 0) {
+            hal_f32 s, e;
+            if (!cur_clip || !parse_float(&p, &s) ||
+                !parse_float(&p, &e) || !expect_end_of_line(&p)) {
+                set_err(err, err_cap,
+                        "line %d: range wants two numbers (in a clip)",
+                        line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            cur_clip->start = s;
+            cur_clip->end = e;
+        } else if (strcmp(key, "loop") == 0) {
+            hal_u32 v = 0;
+            if (!cur_clip || !parse_u32(&p, &v) ||
+                !expect_end_of_line(&p)) {
+                set_err(err, err_cap,
+                        "line %d: loop wants 0 or 1", line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            cur_clip->loop = v != 0;
+        } else if (strcmp(key, "channel") == 0) {
+            hal_u32 type = 0, object = 0;
+            int bone = -2;
+            char *tok = NULL;
+            bool ok_line = cur_clip && parse_u32(&p, &type);
+            if (ok_line)
+                ok_line = parse_u32(&p, &object);
+            if (ok_line) {
+                tok = parse_word(&p);
+                ok_line = tok != NULL;
+            }
+            if (ok_line) {
+                bone = (int)strtol(tok, NULL, 10);
+                free(tok);
+            }
+            if (!ok_line || !expect_end_of_line(&p) ||
+                type >= HAL_CH__COUNT) {
+                set_err(err, err_cap,
+                        "line %d: channel wants: type object bone",
+                        line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            cur_channel = hal_clip_channel(cur_clip,
+                                           (hal_channel_type)type,
+                                           object, bone);
+            if (!cur_channel) {
+                set_err(err, err_cap, "out of memory");
+                result = HAL_ERR_OUT_OF_MEMORY;
+                free(key);
+                goto done;
+            }
+        } else if (strcmp(key, "key") == 0) {
+            hal_f32 time, v[3], q[4];
+            hal_u32 interp = 0;
+            bool ok_line = cur_channel && parse_float(&p, &time);
+            for (int i = 0; ok_line && i < 3; i++)
+                ok_line = parse_float(&p, &v[i]);
+            for (int i = 0; ok_line && i < 4; i++)
+                ok_line = parse_float(&p, &q[i]);
+            if (ok_line)
+                ok_line = parse_u32(&p, &interp);
+            if (!ok_line || !expect_end_of_line(&p) ||
+                interp > HAL_INTERP_STEP) {
+                set_err(err, err_cap,
+                        "line %d: key wants: time vec(3) quat(4) interp",
+                        line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            hal_keyframe kf = {
+                .time = time,
+                .vec = hal_vec3f_make(v[0], v[1], v[2]),
+                .rot = hal_quatf_normalize(
+                    hal_quatf_make(q[0], q[1], q[2], q[3])),
+                .interp = (hal_interp)interp
+            };
+            /* Append in file order (the saver writes sorted keys). */
+            if (cur_channel->count == cur_channel->cap) {
+                size_t cap = cur_channel->cap
+                                 ? cur_channel->cap * 2
+                                 : 8;
+                hal_keyframe *grown =
+                    realloc(cur_channel->keys,
+                            cap * sizeof(*grown));
+                if (!grown) {
+                    set_err(err, err_cap, "out of memory");
+                    result = HAL_ERR_OUT_OF_MEMORY;
+                    free(key);
+                    goto done;
+                }
+                cur_channel->keys = grown;
+                cur_channel->cap = cap;
+            }
+            cur_channel->keys[cur_channel->count++] = kf;
         } else if (strcmp(key, "end") == 0) {
-            if (current == HAL_OBJECT_ID_NONE) {
+            /* 'end' closes an object block, a material block, or a
+             * clip's channel/block nesting — disambiguated by state. */
+            if (cur_channel) {
+                cur_channel = NULL;
+            } else if (cur_clip) {
+                cur_clip = NULL;
+            } else if (current == HAL_OBJECT_ID_NONE) {
                 set_err(err, err_cap,
                         "line %d: 'end' outside an object block", line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
                 goto done;
+            } else {
+                current = HAL_OBJECT_ID_NONE;
             }
-            current = HAL_OBJECT_ID_NONE;
             consume_line(&p);
         } else {
             set_err(err, err_cap, "line %d: unknown key '%s'", line_no, key);

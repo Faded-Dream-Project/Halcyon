@@ -4,6 +4,7 @@
  */
 
 #include "shell.h"
+#include "core/anim.h"
 #include "core/armature.h"
 #include "core/material.h"
 #include "core/mesh.h"
@@ -23,6 +24,7 @@
 /* Layout metrics (logical px). */
 #define SHELL_MENUBAR_H 30.0f
 #define SHELL_STATUSBAR_H 26.0f
+#define SHELL_TIMELINE_H 64.0f
 #define SHELL_TOOLBAR_W 42.0f
 #define SHELL_SIDEBAR_W 240.0f
 #define SHELL_VIEWPORT_MIN 100.0f
@@ -82,6 +84,13 @@ struct hal_app {
     hal_object_id pose_obj;
     int bone_modal;         /* bone index during modal rotation */
     hal_quatf bone_modal_orig;
+
+    /* Animation: the active clip, the playhead, playback. */
+    int active_clip;        /* -1 none                            */
+    hal_f32 play_time;      /* seconds                            */
+    bool playing;
+    bool timeline_drag;     /* scrubbing the playhead             */
+    hal_rectf timeline_rect;
 
     /* The move gizmo: axis under drag (-1 = none). */
     int gizmo_axis;
@@ -630,6 +639,14 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, edit, "Solve IK (tip to mouse)", NULL,
                       menu_action, app);
 
+    int anim_menu = hal_menu_add(bar, "Animation");
+    hal_menu_item_add(bar, anim_menu, "New Clip", NULL, menu_action, app);
+    hal_menu_item_add(bar, anim_menu, "Insert Key", "I", menu_action, app);
+    hal_menu_item_add(bar, anim_menu, "Play / Pause", "Space",
+                      menu_action, app);
+    hal_menu_item_add(bar, anim_menu, "Toggle Loop", NULL, menu_action,
+                      app);
+
     int add = hal_menu_add(bar, "Add");
     hal_menu_item_add(bar, add, "Cube", NULL, menu_action, app);
     hal_menu_item_add(bar, add, "Sphere", NULL, menu_action, app);
@@ -1092,7 +1109,74 @@ static void menu_action(hal_widget *menubar, int menu, int item,
         default:
             break;
         }
-    } else if (menu == 2) { /* Add */
+    } else if (menu == 2) { /* Animation */
+        switch (item) {
+        case 0: {
+            char name[64];
+            snprintf(name, sizeof(name), "Clip %zu",
+                     hal_scene_clip_count(app->scene));
+            int idx = hal_scene_clip_add(app->scene, name);
+            if (idx >= 0) {
+                app->active_clip = idx;
+                app->play_time = 0.0f;
+                set_status(app, "Created %s", name);
+            }
+            break;
+        }
+        case 1: { /* Insert Key: object TRS, or the posed bone. */
+            if (app->active_clip < 0) {
+                set_status(app, "Insert Key: create a clip first");
+                break;
+            }
+            hal_clip *clip =
+                hal_scene_clip(app->scene, app->active_clip);
+            if (!clip)
+                break;
+            if (app->pose_mode) {
+                hal_object *arm_obj =
+                    hal_scene_object(app->scene, app->pose_obj);
+                int bone = -1;
+                if (arm_obj && arm_obj->armature)
+                    for (size_t b = 0; b < arm_obj->armature->count; b++)
+                        if (arm_obj->armature->bones[b].selected)
+                            bone = (int)b;
+                if (bone >= 0) {
+                    hal_clip_key_rot(clip, app->pose_obj, bone,
+                                     app->play_time,
+                                     arm_obj->armature->bones[bone].pose,
+                                     HAL_INTERP_SMOOTH);
+                    set_status(app, "Bone key at %.2fs", app->play_time);
+                } else {
+                    set_status(app, "Insert Key: select a bone");
+                }
+            } else {
+                hal_object_id sel = hal_scene_selected(app->scene);
+                if (hal_clip_key_object(clip, app->scene, sel,
+                                        app->play_time))
+                    set_status(app, "Object keys at %.2fs",
+                               app->play_time);
+            }
+            break;
+        }
+        case 2: /* Play / Pause */
+            if (app->active_clip >= 0) {
+                app->playing = !app->playing;
+                set_status(app, app->playing ? "Playing" : "Paused");
+            }
+            break;
+        case 3: {
+            hal_clip *clip =
+                hal_scene_clip(app->scene, app->active_clip);
+            if (clip) {
+                clip->loop = !clip->loop;
+                set_status(app, "Loop %s", clip->loop ? "on" : "off");
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    } else if (menu == 3) { /* Add */
         if (item <= 5) {
             add_object(app, ADD_NAMES[item],
                        HAL_OBJECT_MESH, hal_vec3f_zero());
@@ -1560,6 +1644,44 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
         }
     }
 
+    /* --- Timeline scrubbing (before camera handling) --- */
+    {
+        hal_rectf tr = app->timeline_rect;
+        bool in_tl = tr.height > 0.0f && px >= tr.x && py >= tr.y &&
+                     px < tr.x + tr.width && py < tr.y + tr.height;
+        hal_clip *clip = hal_scene_clip(app->scene, app->active_clip);
+        if (app->timeline_drag && clip &&
+            event->type == HAL_EVENT_POINTER_MOTION) {
+            hal_f32 span = clip->end - clip->start;
+            if (span > 1e-4f) {
+                app->play_time =
+                    clip->start + (px - tr.x) / tr.width * span;
+                if (app->play_time < clip->start)
+                    app->play_time = clip->start;
+                if (app->play_time > clip->end)
+                    app->play_time = clip->end;
+                hal_clip_sample(clip, app->scene, app->play_time);
+            }
+            return true;
+        }
+        if (event->type == HAL_EVENT_POINTER_BUTTON_DOWN && in_tl &&
+            clip) {
+            app->timeline_drag = true;
+            app->playing = false;
+            hal_f32 span = clip->end - clip->start;
+            if (span > 1e-4f)
+                app->play_time =
+                    clip->start + (px - tr.x) / tr.width * span;
+            hal_clip_sample(clip, app->scene, app->play_time);
+            return true;
+        }
+        if (event->type == HAL_EVENT_POINTER_BUTTON_UP &&
+            app->timeline_drag) {
+            app->timeline_drag = false;
+            return true;
+        }
+    }
+
     /* --- Camera: MMB or Alt+LMB orbits, Shift+MMB pans --- */
     if (event->type == HAL_EVENT_POINTER_BUTTON_DOWN && in_vp) {
         hal_u32 mods = event->pointer_button.modifiers;
@@ -1763,6 +1885,17 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
             return false;
         }
 
+        /* Animation keys (any mode). */
+        if (key_plain == 23 /* I */ &&
+            !(event->key.modifiers & HAL_MOD_ALT)) {
+            menu_action(NULL, 2, 1, app);
+            return true;
+        }
+        if (key_plain == 57) { /* Space */
+            menu_action(NULL, 2, 2, app);
+            return true;
+        }
+
         /* Edit-mode keys. */
         if (key_plain == 2 || key_plain == 3 ||
             key_plain == 4) { /* 1/2/3 */
@@ -1825,7 +1958,13 @@ static void layout_shell(hal_app *app, hal_f32 w, hal_f32 h) {
     hal_f32 sidebar_x = w - sidebar_w;
     if (sidebar_x < SHELL_TOOLBAR_W + SHELL_VIEWPORT_MIN)
         sidebar_x = w * 0.5f;
-    hal_f32 body_h = h - mbar.height - SHELL_STATUSBAR_H;
+    bool timeline = app->active_clip >= 0;
+    hal_f32 timeline_h = timeline ? SHELL_TIMELINE_H : 0.0f;
+    app->timeline_rect = (hal_rectf){
+        0, h - SHELL_STATUSBAR_H - timeline_h, w, timeline_h
+    };
+    hal_f32 body_h =
+        h - mbar.height - SHELL_STATUSBAR_H - timeline_h;
     hal_widget_set_rect(sidebar,
                         (hal_rectf){ sidebar_x, mbar.height, w - sidebar_x,
                                     body_h });
@@ -1849,8 +1988,84 @@ hal_rectf hal_app_viewport_rect(const hal_app *app) {
     hal_f32 vw = w - SHELL_TOOLBAR_W - sidebar_w;
     if (vw < SHELL_VIEWPORT_MIN)
         vw = SHELL_VIEWPORT_MIN;
-    return (hal_rectf){ SHELL_TOOLBAR_W, mbar.height, vw,
-                        h - mbar.height - SHELL_STATUSBAR_H };
+    return (hal_rectf){
+        SHELL_TOOLBAR_W, mbar.height, vw,
+        h - mbar.height - SHELL_STATUSBAR_H -
+            (app && app->active_clip >= 0 ? SHELL_TIMELINE_H : 0.0f)
+    };
+}
+
+/* The timeline: ruler, channel rows with key dots, the playhead. */
+static void paint_timeline(hal_app *app, hal_canvas *canvas) {
+    const hal_theme *t = hal_ui_theme(app->ui);
+    hal_clip *clip = hal_scene_clip(app->scene, app->active_clip);
+    if (!clip)
+        return;
+    hal_rectf r = app->timeline_rect;
+    if (r.height <= 0.0f)
+        return;
+
+    hal_canvas_fill_rect(canvas, r, t->colors[HAL_THEME_PANEL]);
+
+    hal_f32 span = clip->end - clip->start;
+    if (span < 1e-3f)
+        span = 1.0f;
+#define TL_X(time) (r.x + ((time) - clip->start) / span * r.width)
+
+    /* Ruler ticks every half second (at least 6 ticks). */
+    hal_f32 step = 0.5f;
+    while (span / step < 4.0f && step > 0.01f)
+        step *= 0.5f;
+    hal_font *font = hal_ui_font(app->ui, t->font_size_small);
+    for (hal_f32 time = clip->start; time <= clip->end + 1e-4f;
+         time += step) {
+        hal_f32 x = TL_X(time);
+        hal_canvas_draw_line(canvas, x, r.y, x, r.y + r.height,
+                             t->colors[HAL_THEME_BORDER]);
+        if (font) {
+            char label[16];
+            snprintf(label, sizeof(label), "%.1f", (double)time);
+            hal_canvas_draw_text(canvas, font, label, strlen(label),
+                                 x + 2.0f, r.y + 12.0f,
+                                 t->colors[HAL_THEME_TEXT_DIM]);
+        }
+    }
+
+    /* One row per channel: key dots; a bone channel's row carries a
+     * small marker. */
+    hal_f32 row_h = 10.0f;
+    hal_f32 row_y = r.y + 18.0f;
+    for (size_t c = 0; c < clip->count; c++) {
+        hal_anim_channel *ch = &clip->channels[c];
+        for (size_t k = 0; k < ch->count; k++) {
+            hal_f32 x = TL_X(ch->keys[k].time);
+            hal_color col = ch->type == HAL_CH_BONE
+                                ? t->colors[HAL_THEME_SUCCESS]
+                                : ch->type == HAL_CH_ROT
+                                      ? t->colors[HAL_THEME_WARNING]
+                                      : t->colors[HAL_THEME_ACCENT];
+            hal_canvas_fill_circle(canvas, x, row_y + row_h * 0.5f,
+                                   3.0f, col);
+        }
+        row_y += row_h;
+        if (row_y > r.y + r.height - 6.0f)
+            break; /* more channels than rows: later rows not drawn */
+    }
+
+    /* The playhead. */
+    hal_f32 px = TL_X(app->play_time);
+    hal_canvas_draw_line(canvas, px, r.y, px, r.y + r.height,
+                         t->colors[HAL_THEME_TEXT]);
+    if (font) {
+        char label[96];
+        snprintf(label, sizeof(label), "%s %.2fs%s", clip->name,
+                 (double)app->play_time,
+                 app->playing ? "  >" : "  ||");
+        hal_canvas_draw_text(canvas, font, label, strlen(label),
+                             r.x + 6.0f, r.y + r.height - 4.0f,
+                             t->colors[HAL_THEME_TEXT]);
+    }
+#undef TL_X
 }
 
 static void paint_viewport(hal_app *app, hal_canvas *canvas) {
@@ -1867,6 +2082,38 @@ static void paint_viewport(hal_app *app, hal_canvas *canvas) {
 
     hal_render_view(&app->raster, app->scene, &app->camera, canvas, vp,
                     &opts);
+}
+
+void hal_app_tick(hal_app *app, double now_seconds) {
+    if (!app || !app->playing)
+        return;
+    hal_clip *clip = hal_scene_clip(app->scene, app->active_clip);
+    if (!clip) {
+        app->playing = false;
+        return;
+    }
+    static double last = -1.0;
+    double dt = last >= 0.0 ? now_seconds - last : 0.0;
+    last = now_seconds;
+    if (dt > 0.25)
+        dt = 0.25;
+    if (dt <= 0.0)
+        return;
+
+    app->play_time += (hal_f32)dt;
+    if (app->play_time > clip->end) {
+        if (clip->loop)
+            app->play_time =
+                clip->start +
+                (hal_f32)fmod((double)(app->play_time - clip->start),
+                              (double)(clip->end - clip->start));
+        else {
+            app->play_time = clip->end;
+            app->playing = false;
+        }
+    }
+    hal_clip_sample(clip, app->scene, app->play_time);
+    app->dirty = true;
 }
 
 void hal_app_paint(hal_app *app, hal_surface *surface) {
@@ -1890,6 +2137,9 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
 
     /* The 3D view renders into its rect over the UI's empty middle. */
     paint_viewport(app, &canvas);
+
+    /* The timeline strip (when a clip is active). */
+    paint_timeline(app, &canvas);
 
     /* Overlays: edit-mode selection and the move gizmo. */
     {

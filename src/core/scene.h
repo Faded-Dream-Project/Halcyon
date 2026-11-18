@@ -18,6 +18,7 @@
 
 #include "../platform/types.h"
 #include "math.h"
+#include "anim.h"
 #include "armature.h"
 #include "material.h"
 #include "mesh.h"
@@ -77,6 +78,8 @@ typedef struct hal_scene {
     size_t material_count;
     char **images;           /* owned image file paths (textures)     */
     size_t image_count;
+    hal_clip *clips;         /* owned animation clips                 */
+    size_t clip_count;
 } hal_scene;
 
 /* ---- Scene lifecycle ---- */

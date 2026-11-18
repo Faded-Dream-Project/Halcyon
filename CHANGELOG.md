@@ -6,6 +6,20 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — M8: animation (2026-11-18)
+
+- Clips with per-property channels (loc/rot/scale/bone), sorted keys,
+  per-key easing (linear, smooth, step), quaternion slerp, looping.
+- Timeline strip: ruler, per-channel key rows, playhead, scrubbing;
+  playback with loop wrap in the frame loop; Space, I (insert key),
+  clip management on the Animation menu; clips persist in the
+  project format.
+- glTF 2.0 animation export: baked 30 fps LINEAR samplers, accessor/
+  bufferView numbering after mesh + image slots (validated with an
+  independent JSON parser).
+- Tests: test_anim — 50 checks. Pending (recorded in PROGRESS.md):
+  curve editor widget, manual weight painting, glTF skin export.
+
 ### Added — M7: rigging (2026-11-18)
 
 - Armatures: bones with parents, local pose rotations, chain posing.

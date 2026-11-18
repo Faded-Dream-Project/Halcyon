@@ -42,6 +42,10 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event);
  * viewport animates. */
 void hal_app_paint(hal_app *app, hal_surface *surface);
 
+/* Advances clip playback (call every loop iteration with a monotonic
+ * clock); marks the UI dirty while playing. */
+void hal_app_tick(hal_app *app, double now_seconds);
+
 /* The viewport's rect in window-logical pixels (where the 3D view
  * renders). */
 hal_rectf hal_app_viewport_rect(const hal_app *app);

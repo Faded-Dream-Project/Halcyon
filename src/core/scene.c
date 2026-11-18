@@ -52,6 +52,12 @@ void hal_scene_destroy(hal_scene *scene) {
     for (size_t i = 0; i < scene->image_count; i++)
         free(scene->images[i]);
     free(scene->images);
+    for (size_t i = 0; i < scene->clip_count; i++)
+        for (size_t c = 0; c < scene->clips[i].count; c++)
+            free(scene->clips[i].channels[c].keys);
+    for (size_t i = 0; i < scene->clip_count; i++)
+        free(scene->clips[i].channels);
+    free(scene->clips);
     free(scene->name);
     free(scene);
 }

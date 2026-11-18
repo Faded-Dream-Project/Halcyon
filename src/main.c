@@ -121,8 +121,9 @@ int main(int argc, char **argv) {
             break;
         }
 
-        /* Autosave rides the frame loop's clock. */
+        /* Playback + autosave ride the frame loop's clock. */
         double now = now_seconds();
+        hal_app_tick(frame.app, now);
         if (now - frame.last_autosave_tick > 1.0) {
             frame.last_autosave_tick = now;
             hal_autosave_tick(hal_app_autosave(frame.app),
