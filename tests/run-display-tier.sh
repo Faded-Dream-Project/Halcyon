@@ -41,6 +41,10 @@ for cfg in "1920 1080 1.0" "1920 1080 2.0" "1366 768 1.0" \
         "$APP" --ui-audit "$1" "$2" "$3" || status=$?
 done
 
+echo "test-display: z-order regression"
+DISPLAY=":$disp" LSAN_OPTIONS="suppressions=$SUPP" \
+    "$APP" --test-zorder || status=$?
+
 if [ -n "$ALT_FONT" ] && [ -f "$ALT_FONT" ]; then
     echo "test-display: ui-audit alternate font $ALT_FONT"
     DISPLAY=":$disp" HAL_UI_FONT="$ALT_FONT" \

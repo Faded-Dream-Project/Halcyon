@@ -49,6 +49,10 @@ void hal_app_paint(hal_app *app, hal_surface *surface);
 int hal_app_run_ui_audit(hal_app *app, hal_surface *surface,
                          hal_f32 forced_scale);
 
+/* STEP-1a regression: opens the File menu over the viewport and
+ * checks pixel ownership + input priority. 0 = pass. */
+int hal_app_run_zorder_test(hal_app *app, hal_surface *surface);
+
 /* Advances clip playback (call every loop iteration with a monotonic
  * clock); marks the UI dirty while playing. */
 void hal_app_tick(hal_app *app, double now_seconds);

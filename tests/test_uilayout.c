@@ -198,8 +198,8 @@ static void test_grid_projection_matches_math(void) {
                 int y = (int)(sy + 0.5f) + dy;
                 if (x < 0 || y < 0 || x >= W || y >= H)
                     continue;
-                hal_u32 p = ((hal_u32 *)c.pixels)[y * (c.stride / 4) +
-                                                 x];
+                hal_u32 p = ((hal_u32 *)c.pixels)[(size_t)y * (size_t)c.stride +
+                                                 (size_t)x];
                 if ((((p & 255) + ((p >> 8) & 255) +
                       ((p >> 16) & 255)) / 3) > 60)
                     ink = true;

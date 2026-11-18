@@ -3352,8 +3352,13 @@ void hal_app_tick(hal_app *app, double now_seconds) {
     app->dirty = true;
 }
 
-void hal_app_paint(hal_app *app, hal_surface *surface) {
-    if (!app || !surface)
+/* The full editor frame WITHOUT the present: paint passes, overlays
+ * and the topmost popup repaint. Split out so tests can drive real
+ * frames and inspect pixels without presenting twice per loop
+ * iteration (present is paced; a nested present deadlocks). */
+static void hal_app_paint_frame(hal_app *app, hal_surface *surface,
+                                hal_canvas *canvas_out) {
+    if (!app || !surface || !canvas_out)
         return;
 
     hal_size win_size;
@@ -3362,17 +3367,17 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
         return;
     hal_window_get_scale(app->window, &scale);
 
-    hal_canvas canvas;
-    if (!hal_canvas_init(&canvas, surface, scale))
+    if (!hal_canvas_init(canvas_out, surface, scale))
         return;
+    hal_canvas *canvas = canvas_out;
 
     /* Layout in LOGICAL units from the surface (physical / scale) —
      * never the raw window size, which need not match at HiDPI. */
-    hal_sizef logical = hal_canvas_size(&canvas);
+    hal_sizef logical = hal_canvas_size(canvas);
     hal_ui_set_scale(app->ui, scale);
     layout_shell(app, logical.width, logical.height);
 
-    hal_ui_paint(app->ui, &canvas);
+    hal_ui_paint(app->ui, canvas);
 
     /* A quiet panel strip behind the status + hint lines so the
      * bottom of the window reads as one bar. AFTER the UI paint:
@@ -3381,12 +3386,12 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
     {
         const hal_theme *t = hal_ui_theme(app->ui);
         hal_canvas_fill_rect(
-            &canvas,
+            canvas,
             (hal_rectf){ 0, logical.height - SHELL_STATUSBAR_H,
                          logical.width, SHELL_STATUSBAR_H },
             t->colors[HAL_THEME_PANEL]);
         hal_canvas_draw_line(
-            &canvas, 0, logical.height - SHELL_STATUSBAR_H,
+            canvas, 0, logical.height - SHELL_STATUSBAR_H,
             logical.width, logical.height - SHELL_STATUSBAR_H,
             t->colors[HAL_THEME_BORDER]);
         /* The labels again, on top of the strip. */
@@ -3399,7 +3404,7 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
                 hal_font_get_metrics(font, &m);
                 hal_rectf r = status->abs_rect;
                 hal_canvas_draw_text(
-                    &canvas, font, status->text,
+                    canvas, font, status->text,
                     strlen(status->text), r.x,
                     hal__baseline(r.y, r.height, &m,
                                   hal_ui_scale(app->ui)),
@@ -3409,10 +3414,10 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
     }
 
     /* The 3D view renders into its rect over the UI's empty middle. */
-    paint_viewport(app, &canvas);
+    paint_viewport(app, canvas);
 
     /* The timeline strip (when a clip is active). */
-    paint_timeline(app, &canvas);
+    paint_timeline(app, canvas);
     hal_curves_bind(
         app->curves,
         hal_scene_clip(app->scene, app->active_clip));
@@ -3446,7 +3451,7 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
                         hal_mat4f_transform_point(world, mm->verts[v]),
                         vp2, &w);
                     if (w > 0.0f)
-                        hal_canvas_fill_circle(&canvas, sp.x, sp.y, 3.5f,
+                        hal_canvas_fill_circle(canvas, sp.x, sp.y, 3.5f,
                                                t->colors[HAL_THEME_ACCENT]);
                 }
                 /* Selected edges: accent lines. */
@@ -3465,7 +3470,7 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
                             world, mm->verts[mm->edges[e * 2 + 1]]),
                         vp2, &w1);
                     if (w0 > 0.0f && w1 > 0.0f)
-                        hal_canvas_draw_line(&canvas, a.x, a.y, b.x, b.y,
+                        hal_canvas_draw_line(canvas, a.x, a.y, b.x, b.y,
                                              t->colors[HAL_THEME_ACCENT]);
                 }
                 /* The first-run quick start (until the first
@@ -3484,12 +3489,12 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
                     hal_f32 ox2 = vpq.x + 24.0f;
                     hal_f32 oy2 = vpq.y + 28.0f;
                     hal_canvas_fill_rect(
-                        &canvas,
+                        canvas,
                         (hal_rectf){ ox2 - 10.0f, oy2 - 18.0f,
                                      430.0f, 190.0f },
                         t->colors[HAL_THEME_PANEL]);
                     hal_canvas_draw_rect(
-                        &canvas,
+                        canvas,
                         (hal_rectf){ ox2 - 10.0f, oy2 - 18.0f,
                                      430.0f, 190.0f },
                         t->colors[HAL_THEME_BORDER]);
@@ -3497,7 +3502,7 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
                          li2 < sizeof(lines) / sizeof(lines[0]);
                          li2++) {
                         hal_canvas_draw_text(
-                            &canvas,
+                            canvas,
                             hal_ui_font(app->ui,
                                         li2 == 0
                                             ? t->font_size
@@ -3512,7 +3517,7 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
                 /* The knife drag line. */
                 if (app->knifing) {
                     hal_canvas_draw_line(
-                        &canvas, app->knife_start.x,
+                        canvas, app->knife_start.x,
                         app->knife_start.y, app->last_pointer.x,
                         app->last_pointer.y,
                         t->colors[HAL_THEME_DANGER]);
@@ -3532,7 +3537,7 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
                         &app->camera, vpm2,
                         hal_mat4f_transform_point(world, c), vp2, &w);
                     if (w > 0.0f)
-                        hal_canvas_fill_circle(&canvas, sp.x, sp.y, 3.0f,
+                        hal_canvas_fill_circle(canvas, sp.x, sp.y, 3.0f,
                                                t->colors[HAL_THEME_TEXT]);
                 }
             }
@@ -3571,12 +3576,12 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
                             continue;
                         hal_vec2f tip = { s0.x + d.x / dl * len,
                                           s0.y + d.y / dl * len };
-                        hal_canvas_draw_line(&canvas, s0.x, s0.y, tip.x,
+                        hal_canvas_draw_line(canvas, s0.x, s0.y, tip.x,
                                              tip.y, colors[i]);
-                        hal_canvas_fill_circle(&canvas, tip.x, tip.y,
+                        hal_canvas_fill_circle(canvas, tip.x, tip.y,
                                                4.0f, colors[i]);
                         if (app->gizmo_axis == i)
-                            hal_canvas_fill_circle(&canvas, tip.x,
+                            hal_canvas_fill_circle(canvas, tip.x,
                                                    tip.y, 7.0f,
                                                    colors[i]);
                     }
@@ -3585,6 +3590,20 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
         }
     }
 
+    /* Menus, popups and tooltips are TOPMOST: the 3D viewport and
+     * the edit overlays paint after the UI pass and would cover an
+     * open popup (the File menu rendered under the viewport, its
+     * items cut at the viewport's left edge). The overlay painters
+     * are state-checked no-ops when nothing is open. */
+    hal__paint_menu_overlay(app->ui, canvas);
+    hal__paint_tooltip(app->ui, canvas);
+}
+
+void hal_app_paint(hal_app *app, hal_surface *surface) {
+    hal_canvas canvas;
+    hal_app_paint_frame(app, surface, &canvas);
+    if (!canvas.surface)
+        return;
     hal_surface_invalidate_all(surface);
     hal_surface_present(surface);
 }
@@ -3658,4 +3677,197 @@ int hal_app_run_ui_audit(hal_app *app, hal_surface *surface,
     int violations = hal__ui_audit(app->ui, &canvas);
     hal_ui_set_scale(app->ui, saved);
     return violations;
+}
+
+/* ---- STEP-1a regression: popups own their pixels over the viewport
+ * and receive input before it ------------------------------------------
+ * Opens the real File menu, paints the REAL frame (UI + viewport +
+ * overlays), then checks PIXELS: inside the popup's inner rect, the
+ * popup's panel must own the pixels and the viewport background must
+ * not (the old bug drew the viewport over the popup). Then INPUT: a
+ * click on a menu item that lands INSIDE the viewport's rect must be
+ * consumed by the menu and run the command (File > New resets the
+ * scene), never by the viewport. Returns 0 = pass. */
+int hal_app_run_zorder_test(hal_app *app, hal_surface *surface) {
+    if (!app || !surface)
+        return 1;
+
+    /* Open the File menu (index 0) exactly as the input path does. */
+    hal_widget *bar = app->menubar;
+    if (!bar)
+        return 1;
+    app->ui->open_menubar = bar;
+    app->ui->open_menu_index = 0;
+    app->ui->menu_hover_item = -1;
+    app->ui->needs_paint = true;
+
+    /* Paint the REAL frame into an OFFSCREEN surface: the window
+     * surface is double-buffered behind the hybrid GL lane and raw
+     * pointer reads mid-cycle interleave the two buffers — an
+     * offscreen surface is plain memory and deterministic. The paint
+     * path is identical. */
+    hal_size ws;
+    if (!hal_ok(hal_window_get_size(app->window, &ws)) ||
+        ws.width <= 0 || ws.height <= 0) {
+        fprintf(stderr, "zorder: FAIL - no window size\n");
+        return 1;
+    }
+    hal_surface *off = NULL;
+    if (!hal_ok(hal_surface_offscreen_create((int)ws.width,
+                                             (int)ws.height, &off))) {
+        fprintf(stderr, "zorder: FAIL - offscreen surface\n");
+        hal_surface_destroy(off);
+        return 1;
+    }
+    hal_canvas canvas;
+    hal_app_paint_frame(app, off, &canvas);
+    if (!canvas.surface) {
+        hal_surface_destroy(off);
+        fprintf(stderr, "zorder: FAIL - no canvas\n");
+        hal_surface_destroy(off);
+        return 1;
+    }
+
+    hal_rectf popup = hal__menu_popup_rect(app->ui);
+    hal_rectf vp = hal_app_viewport_rect(app);
+    if (popup.width <= 8.0f || popup.height <= 8.0f) {
+        fprintf(stderr, "zorder: FAIL - popup has no rect\n");
+        hal_surface_destroy(off);
+        return 1;
+    }
+    /* The test needs the overlap to exist (popup reaching past the
+     * viewport's left edge). */
+    if (popup.x + popup.width <= vp.x + 8.0f) {
+        fprintf(stderr,
+                "zorder: FAIL - popup does not reach the viewport "
+                "(popup %.0f..%.0f vp.x %.0f)\n",
+                popup.x, popup.x + popup.width, vp.x);
+        return 1;
+    }
+
+    const hal_theme *t = hal_ui_theme(app->ui);
+    /* Theme colors as displayed bytes (the canvas packs ABGR in the
+     * low 24 bits; read through the same packing). */
+    hal_u32 panel = (hal_u32)(t->colors[HAL_THEME_PANEL].b * 255.0f) |
+                    ((hal_u32)(t->colors[HAL_THEME_PANEL].g * 255.0f)
+                     << 8) |
+                    ((hal_u32)(t->colors[HAL_THEME_PANEL].r * 255.0f)
+                     << 16);
+    hal_u32 vpbg = (hal_u32)(t->colors[HAL_THEME_VIEWPORT_BG].b *
+                             255.0f) |
+                   ((hal_u32)(t->colors[HAL_THEME_VIEWPORT_BG].g *
+                              255.0f)
+                    << 8) |
+                   ((hal_u32)(t->colors[HAL_THEME_VIEWPORT_BG].r *
+                              255.0f)
+                    << 16);
+
+    /* Sample the popup's INNER rect (inset 6px, past border and
+     * shadow). */
+    hal_i32 x0 = (hal_i32)(popup.x + 6.0f);
+    hal_i32 x1 = (hal_i32)(popup.x + popup.width - 6.0f);
+    hal_i32 y0 = (hal_i32)(popup.y + 8.0f);
+    hal_i32 y1 = (hal_i32)(popup.y + popup.height - 6.0f);
+    hal_u32 *px = (hal_u32 *)canvas.pixels;
+    /* FDK reports stride in fdk_u32 units (fdk_surface.h:87), not
+     * bytes — index rows directly. */
+    size_t stride = (size_t)canvas.stride;
+    long panel_n = 0, vpb_g_n = 0;
+    for (hal_i32 y = y0; y < y1; y++)
+        for (hal_i32 x = x0; x < x1; x++) {
+            if (x < 0 || y < 0 || x >= (hal_i32)canvas.width ||
+                y >= (hal_i32)canvas.height)
+                continue;
+            hal_u32 p = px[(size_t)y * stride + (size_t)x];
+            if (p == panel)
+                panel_n++;
+            if (p == vpbg)
+                vpb_g_n++;
+        }
+    if (panel_n < 200) {
+        fprintf(stderr,
+                "zorder: FAIL - popup panel owns only %ld px inside "
+                "its rect (expected hundreds)\n",
+                panel_n);
+        return 1;
+    }
+    if (vpb_g_n > 0) {
+        fprintf(stderr,
+                "zorder: FAIL - %ld viewport-bg pixels inside the "
+                "popup rect: the viewport painted OVER the popup\n",
+                vpb_g_n);
+        return 1;
+    }
+
+    /* Text ink in the overlap zone: at least one item's glyphs must
+     * be readable past the viewport's left edge. */
+    hal_i32 ox0 = (hal_i32)(vp.x + 4.0f);
+    long ink = 0;
+    for (hal_i32 y = y0; y < y1; y++)
+        for (hal_i32 x = ox0; x < x1; x++) {
+            if (x < 0 || y < 0 || x >= (hal_i32)canvas.width ||
+                y >= (hal_i32)canvas.height)
+                continue;
+            hal_u32 p = px[(size_t)y * stride + (size_t)x];
+            int r = (int)(p & 0xFFu), g = (int)((p >> 8) & 0xFFu),
+                b = (int)((p >> 16) & 0xFFu);
+            if (r + g + b > 420)
+                ink++;
+        }
+    if (ink < 12) {
+        fprintf(stderr,
+                "zorder: FAIL - no menu item text ink inside the "
+                "viewport overlap (%ld px)\n",
+                ink);
+        return 1;
+    }
+
+    /* INPUT: File > New (menu 0, item 0). Its rect must overlap the
+     * viewport horizontally for the test to mean anything. */
+    hal_rectf item = hal_ui_menu_item_rect(app->ui, 0);
+    if (item.width <= 0.0f) {
+        fprintf(stderr, "zorder: FAIL - no item rect\n");
+        hal_surface_destroy(off);
+        return 1;
+    }
+    hal_f32 cx = item.x + item.width * 0.5f;
+    hal_f32 cy = item.y + item.height * 0.5f;
+    if (cx < vp.x + 4.0f) {
+        fprintf(stderr,
+                "zorder: FAIL - item 0 center (%.0f) not inside the "
+                "viewport x-range (%.0f+)\n",
+                cx, vp.x);
+        return 1;
+    }
+    size_t before = hal_scene_object_count(hal_app_scene(app));
+
+    hal_event e = { .type = HAL_EVENT_POINTER_BUTTON_DOWN };
+    e.pointer_button.position = (hal_pointf){ cx, cy };
+    e.pointer_button.button = HAL_BUTTON_LEFT;
+    bool consumed = hal_app_handle_event(app, &e);
+    hal_event up = { .type = HAL_EVENT_POINTER_BUTTON_UP };
+    up.pointer_button.position = (hal_pointf){ cx, cy };
+    up.pointer_button.button = HAL_BUTTON_LEFT;
+    hal_app_handle_event(app, &up);
+
+    size_t after = hal_scene_object_count(hal_app_scene(app));
+    if (!consumed) {
+        fprintf(stderr,
+                "zorder: FAIL - the viewport/UI did not consume the "
+                "click on the popup item\n");
+        return 1;
+    }
+    if (after == before) {
+        fprintf(stderr,
+                "zorder: FAIL - File > New did not run (scene count "
+                "still %zu)\n",
+                after);
+        return 1;
+    }
+    printf("zorder: PASS - popup owns its pixels over the viewport "
+           "(panel %ld px, 0 viewport-bg) and the item click ran the "
+           "command (scene %zu -> %zu)\n",
+           panel_n, before, after);
+    hal_surface_destroy(off);
+    return 0;
 }
