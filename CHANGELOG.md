@@ -6,6 +6,17 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — M9 game-asset workflow (2026-11-18, session 3)
+
+- Asset presets on the Add menu: Crate, Barrel, Sword, Table.
+- Vertex-clustering LOD generation (Edit > Generate LOD).
+- Box-collider glTF export from the selected object's world AABB
+  (convex hulls remain future work).
+- glTF export options: Z-up axis and centimeter units (File menu
+  toggles; applied by single, batch and collider exports; animation
+  channels on root nodes convert consistently).
+- Tests: test_gameflow — 26 checks.
+
 ### Added — viewport texture sampling (2026-11-18, session 3)
 
 - Perspective-correct textured triangles in the CPU rasterizer

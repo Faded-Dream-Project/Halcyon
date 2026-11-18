@@ -44,20 +44,19 @@
 
 ## Current state
 
-Session 3 (2026-11-18): items 1 AND 2 of the release plan DONE.
-Item 1: glTF skin export + import with the pose-equivalence round
-trip (see the log below). Item 2: viewport texture sampling — a
-perspective-correct textured-triangle raster path (uv/w + 1/w, per-
-pixel divide), nearest and bilinear repeat-wrap sampling, a
-path-keyed texture cache (decoded through the platform's image
-loader), Edit > Load Texture / Toggle Texture Filter, and the
-material filter persisted. The textured-render test checks pixels
-against known geometry (a 2x2 texel checker on an angled quad) and
-EXPOSED A REAL M3-ERA RASTERIZER BUG: barycentric edge functions
-bound to the wrong vertices (cyclic shift) — invisible with flat
-shading/constant-z triangles, wrong for smooth shading, depth and
-UVs; fixed with an isolated regression test. NEXT: item 3 (M9
-remainder: presets, LODs, collision shapes, units/axis export).
+Session 3 (2026-11-18): items 1-3 of the release plan DONE (all
+pushed). Item 1: glTF skins. Item 2: texture sampling + the
+barycentric-misbinding fix. Item 3 (M9 remainder): asset presets
+(Crate/Barrel/Sword/Table on the Add menu), vertex-clustering LOD
+generation (Edit > Generate LOD; cluster welding with degenerate
+face removal), box-collider glTF export (File menu, from the selected
+object's world AABB), and glTF export options — Z-up axis (rotX+90
+baked into root nodes; animation channels on roots convert too) and
+centimeter units (File menu toggles, also applied by batch and
+collider exports). NEXT: item 4 (curve editor widget + weight
+painting), item 5 (benchmark + rasterizer optimization), then 6/7.
+Convex-hull colliders remain future work (box covers the common
+case; noted below).
 
 ### Implemented and tested
 
@@ -439,6 +438,38 @@ remainder: presets, LODs, collision shapes, units/axis export).
   exact texels, plus a mixed-clip-w case with the perspective-correct
   uv computed by hand — affine picks the wrong texel).
 
+### Implemented and tested — M9 game-asset workflow complete (session 3)
+
+- Asset presets (Add menu): Crate (wood material), Barrel (cylinder +
+  steel material), Sword (tapered blade + guard + handle, three
+  objects), Table (top + 4 legs) — hand-built compositions exercising
+  primitives, transforms and materials.
+- LOD generation: hal_mesh_decimate_cluster — vertex-clustering
+  decimation (lattice weld with centroid representatives; faces
+  survive only when their deduped corner count equals their run
+  length, no wrap collapse; the vert array is replaced directly —
+  compact_verts is a DELETE helper and would wrongly drop faces that
+  reference merged verts). Edit > Generate LOD clones the selected
+  mesh at diag/8 as <name>_LOD. Honest scope: clustering, not
+  quadrics; meshes straddling a cell boundary never merge (a real
+  property, pinned by the test).
+- Collision-shape export: File > Export Box Collider — the selected
+  object's world AABB as a one-box glTF scene (the pipeline verified
+  by re-import and AABB comparison). CONVEX hulls are future work.
+- Units/axis: hal_io_gltf_export_ex with {unit_scale, z_up} — the
+  conversion (S(unit) * rotX(+90)) bakes into ROOT node transforms;
+  children ride the hierarchy; animation channels targeting roots
+  convert (translation rotated+scaled, rotation premultiplied, scale
+  scaled); skin IBMs stay consistent (the conversion is uniform).
+  File menu toggles (Z-Up, Centimeters) feed the single, batch and
+  collider exports. Y-up meters remains the default.
+- Tests: test_gameflow (26 checks — decimation reduction/validity/
+  total-collapse/tiny-cell, z-up+cm root and child world positions
+  through a round trip, defaults unchanged, collider AABB
+  equivalence). Bugs caught: the weld originally used compact_verts
+  (wrong helper — heap overflow, then no reduction) and the huge-cell
+  test straddled a lattice boundary.
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -492,6 +523,10 @@ remainder: presets, LODs, collision shapes, units/axis export).
 
 ## Log
 
+- **2026-11-18 — session 3, item 3: M9 complete.** Asset presets,
+  vertex-clustering LODs, box-collider glTF export, and Z-up /
+  centimeter export options (baked into roots, animation-consistent).
+  2112 headless checks total (26 new in test_gameflow).
 - **2026-11-18 — session 3, item 2: viewport texture sampling.**
   Perspective-correct textured raster path (uv/w + 1/w), nearest +
   bilinear repeat sampling, app-owned texture cache, material filter

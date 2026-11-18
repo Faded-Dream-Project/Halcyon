@@ -24,8 +24,24 @@
 extern "C" {
 #endif
 
+/* glTF export options: unit conversion (scene meters -> target
+ * units; 1.0 = meters, 100.0 = centimeters) and the target's up
+ * axis. glTF data must be Y-up right-handed, so z_up bakes a +90
+ * degree X rotation into every ROOT node (children ride along; skin
+ * inverse binds stay consistent because the conversion is uniform).
+ */
+typedef struct hal_gltf_export_opts {
+    hal_f32 unit_scale; /* default 1.0                     */
+    bool z_up;          /* default false (Y-up)            */
+} hal_gltf_export_opts;
+
+hal_gltf_export_opts hal_gltf_export_opts_default(void);
+
 hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                               char *err, size_t err_cap);
+hal_result hal_io_gltf_export_ex(hal_scene *scene, const char *path,
+                                 const hal_gltf_export_opts *opts,
+                                 char *err, size_t err_cap);
 hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
                               char *err, size_t err_cap);
 

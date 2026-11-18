@@ -101,6 +101,14 @@ void hal_mesh_rebuild_edges(hal_mesh *m);
 /* Recomputes the normal caches (they are lazy; this forces). */
 void hal_mesh_recalc_normals(hal_mesh *m);
 
+/* ---- LOD generation ----
+ * Vertex-clustering decimation: verts snap to a lattice of `cell`
+ * (scene units), welded verts merge, loops remap, and faces that
+ * collapse (consecutive duplicates or below 3 corners) drop. Simple
+ * and predictable — NOT quadric-based. Returns true when the mesh
+ * changed. */
+bool hal_mesh_decimate_cluster(hal_mesh *m, hal_f32 cell);
+
 /* ---- Origin tools (M9) ----
  * Both SHIFT the geometry and return the offset applied, so the
  * caller can compensate the object's location (keeping the geometry

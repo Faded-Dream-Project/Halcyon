@@ -320,8 +320,34 @@ static bool gltf_write_mesh(hal_object *obj, buf *bin, size_t *out_pos_off,
     return true;
 }
 
-hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
-                              char *err, size_t err_cap) {
+hal_gltf_export_opts hal_gltf_export_opts_default(void) {
+    hal_gltf_export_opts o;
+    o.unit_scale = 1.0f;
+    o.z_up = false;
+    return o;
+}
+
+/* Root-node conversion: local' = S(unit) * Rx(90 if z_up) * local.
+ * Returns the rotation quaternion (identity when y-up). */
+static hal_quatf export_axis_rot(bool z_up) {
+    if (!z_up)
+        return hal_quatf_identity();
+    /* +90 degrees about X maps +Z (up in a Z-up workflow) to +Y. */
+    return hal_quatf_make(0.70710678f, 0.0f, 0.0f, 0.70710678f);
+}
+
+hal_result hal_io_gltf_export_ex(hal_scene *scene, const char *path,
+                                 const hal_gltf_export_opts *opts,
+                                 char *err, size_t err_cap) {
+    hal_gltf_export_opts def;
+    if (!opts) {
+        def = hal_gltf_export_opts_default();
+        opts = &def;
+    }
+    const hal_quatf axis_q = export_axis_rot(opts->z_up);
+    const hal_f32 unit = opts->unit_scale > 0.0f ? opts->unit_scale
+                                                  : 1.0f;
+    const bool convert = opts->z_up || unit != 1.0f;
     if (!scene || !path) {
         io_err(err, err_cap, "invalid arguments");
         return HAL_ERR_INVALID_ARGUMENT;
@@ -576,16 +602,28 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                     break;
                 }
         }
-        if (!buf_putf(&js,
-                      ",\"translation\":[%.9g,%.9g,%.9g],"
-                      "\"rotation\":[%.9g,%.9g,%.9g,%.9g],"
-                      "\"scale\":[%.9g,%.9g,%.9g]",
-                      (double)o->location.x, (double)o->location.y,
-                      (double)o->location.z, (double)o->rotation.x,
-                      (double)o->rotation.y, (double)o->rotation.z,
-                      (double)o->rotation.w, (double)o->scale.x,
-                      (double)o->scale.y, (double)o->scale.z))
-            goto oom;
+        {
+            /* Root nodes absorb the unit/axis conversion (children
+             * ride along through the hierarchy). */
+            hal_vec3f loc = o->location;
+            hal_quatf rot = o->rotation;
+            hal_vec3f scl = o->scale;
+            if (convert && o->parent == HAL_OBJECT_ID_NONE) {
+                loc = hal_vec3f_mul(
+                    hal_quatf_rotate_vec3(axis_q, loc), unit);
+                rot = hal_quatf_mul(axis_q, rot);
+                scl = hal_vec3f_mul(scl, unit);
+            }
+            if (!buf_putf(&js,
+                          ",\"translation\":[%.9g,%.9g,%.9g],"
+                          "\"rotation\":[%.9g,%.9g,%.9g,%.9g],"
+                          "\"scale\":[%.9g,%.9g,%.9g]",
+                          (double)loc.x, (double)loc.y, (double)loc.z,
+                          (double)rot.x, (double)rot.y, (double)rot.z,
+                          (double)rot.w, (double)scl.x, (double)scl.y,
+                          (double)scl.z))
+                goto oom;
+        }
         if (!buf_puts(&js, "}"))
             goto oom;
     }
@@ -861,10 +899,26 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                                                &sc);
                         if (paths[p].comps == 3) {
                             hal_vec3f v = p == 0 ? l : sc;
+                            /* Root targets absorb the conversion. */
+                            if (convert &&
+                                o->parent == HAL_OBJECT_ID_NONE) {
+                                if (p == 0)
+                                    v = hal_vec3f_mul(
+                                        hal_quatf_rotate_vec3(axis_q,
+                                                              v),
+                                        unit);
+                                else
+                                    v = hal_vec3f_mul(v, unit);
+                            }
                             if (!buf_put(&bin, &v, sizeof(v)))
                                 goto oom;
-                        } else if (!buf_put(&bin, &r, sizeof(r))) {
-                            goto oom;
+                        } else {
+                            hal_quatf rq = r;
+                            if (convert &&
+                                o->parent == HAL_OBJECT_ID_NONE)
+                                rq = hal_quatf_mul(axis_q, rq);
+                            if (!buf_put(&bin, &rq, sizeof(rq)))
+                                goto oom;
                         }
                     }
                     sampler_block *grown = realloc(
@@ -2421,4 +2475,9 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
     }
     *out_scene = scene;
     return HAL_OK;
+}
+
+hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
+                              char *err, size_t err_cap) {
+    return hal_io_gltf_export_ex(scene, path, NULL, err, err_cap);
 }

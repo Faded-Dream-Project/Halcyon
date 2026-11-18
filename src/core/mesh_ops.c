@@ -1004,3 +1004,138 @@ hal_vec3f hal_mesh_origin_to_zero(hal_mesh *m) {
      * object's LOCATION is what moves — handled by the caller. */
     return offset;
 }
+
+/* Sort key for the clustering weld. */
+typedef struct cluster_key {
+    long kx, ky, kz;
+    hal_u32 old_index;
+    hal_u32 new_index;
+} cluster_key;
+
+static int cluster_cmp(const void *a, const void *b) {
+    const cluster_key *ca = a, *cb = b;
+    if (ca->kx != cb->kx)
+        return ca->kx < cb->kx ? -1 : 1;
+    if (ca->ky != cb->ky)
+        return ca->ky < cb->ky ? -1 : 1;
+    if (ca->kz != cb->kz)
+        return ca->kz < cb->kz ? -1 : 1;
+    if (ca->old_index != cb->old_index)
+        return ca->old_index < cb->old_index ? -1 : 1;
+    return 0;
+}
+
+bool hal_mesh_decimate_cluster(hal_mesh *m, hal_f32 cell) {
+    if (!m || m->vert_count == 0 || cell <= 1e-6f)
+        return false;
+
+    cluster_key *keys = malloc(m->vert_count * sizeof(*keys));
+    if (!keys)
+        return false;
+    for (size_t v = 0; v < m->vert_count; v++) {
+        keys[v].kx = (long)floorf(m->verts[v].x / cell);
+        keys[v].ky = (long)floorf(m->verts[v].y / cell);
+        keys[v].kz = (long)floorf(m->verts[v].z / cell);
+        keys[v].old_index = (hal_u32)v;
+        keys[v].new_index = 0;
+    }
+    qsort(keys, m->vert_count, sizeof(*keys), cluster_cmp);
+
+    /* Assign cluster ids in sorted order; the representative
+     * position is the cluster centroid. */
+    hal_u32 *remap = malloc(m->vert_count * sizeof(hal_u32));
+    hal_vec3f *centroids = NULL;
+    size_t cluster_count = 0;
+    if (!remap)
+        goto fail;
+    centroids = malloc(m->vert_count * sizeof(*centroids));
+    if (!centroids)
+        goto fail;
+    {
+        size_t run_start = 0;
+        for (size_t i = 0; i <= m->vert_count; i++) {
+            bool new_run =
+                i == m->vert_count ||
+                (i > run_start &&
+                 (keys[i].kx != keys[run_start].kx ||
+                  keys[i].ky != keys[run_start].ky ||
+                  keys[i].kz != keys[run_start].kz));
+            if (new_run) {
+                hal_vec3f c = hal_vec3f_zero();
+                for (size_t k = run_start; k < i; k++)
+                    c = hal_vec3f_add(
+                        c, m->verts[keys[k].old_index]);
+                c = hal_vec3f_mul(
+                    c, 1.0f / (hal_f32)(i - run_start));
+                centroids[cluster_count] = c;
+                for (size_t k = run_start; k < i; k++)
+                    keys[k].new_index = (hal_u32)cluster_count;
+                cluster_count++;
+                run_start = i;
+            }
+        }
+    }
+    for (size_t i = 0; i < m->vert_count; i++)
+        remap[keys[i].old_index] = keys[i].new_index;
+
+    /* Remap loops; a face survives ONLY when its deduped corner
+     * count equals its run length (runs never shrink in place — a
+     * shorter survivor would carry stale tail loops) and has no
+     * wrap-around collapse. */
+    bool *keep_face = malloc(m->face_count ? m->face_count : 1);
+    if (!keep_face)
+        goto fail;
+    for (size_t f = 0; f < m->face_count; f++) {
+        size_t n = face_len(m, f);
+        if (n > 64) {
+            keep_face[f] = false;
+            continue;
+        }
+        hal_u32 dedup[64];
+        size_t dn = 0;
+        for (size_t i = 0; i < n; i++) {
+            hal_u32 v = remap[face_vert(m, f, i)];
+            if (dn == 0 || dedup[dn - 1] != v)
+                dedup[dn++] = v;
+        }
+        if (dn >= 3 && dedup[0] == dedup[dn - 1])
+            dn--; /* wrap collapse */
+        bool ok = dn == n && dn >= 3;
+        if (ok)
+            for (size_t i = 0; i < n; i++)
+                m->loops[m->face_off[f] + i] = dedup[i];
+        keep_face[f] = ok;
+    }
+    compact_faces(m, keep_face);
+    free(keep_face);
+
+    /* Weld: the loops already reference cluster ids; replace the
+     * vert array with the cluster centroids directly (compact_verts
+     * is a DELETE helper — it would drop faces that reference
+     * merged-away verts, which is wrong for welding). */
+    {
+        free(m->verts);
+        m->verts = centroids;
+        centroids = NULL; /* ownership moved */
+        m->vert_count = cluster_count;
+        m->vert_cap = cluster_count;
+        free(m->vert_sel);
+        m->vert_sel = calloc(cluster_count ? cluster_count : 1, 1);
+        if (!m->vert_sel)
+            goto fail; /* non-fatal: selection just clears */
+        m->vert_sel_cap = cluster_count;
+        hal_mesh_invalidate_derived(m);
+    }
+
+    free(keys);
+    free(remap);
+    free(centroids);
+    hal_mesh_rebuild_edges(m);
+    return true;
+
+fail:
+    free(keys);
+    free(remap);
+    free(centroids);
+    return false;
+}

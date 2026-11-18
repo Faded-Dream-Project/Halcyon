@@ -93,6 +93,10 @@ struct hal_app {
     /* Material textures decode through this cache (owned). */
     hal_texture_cache *textures;
 
+    /* glTF export options (File menu toggles). */
+    bool export_z_up;
+    bool export_cm;
+
     /* Animation: the active clip, the playhead, playback. */
     int active_clip;        /* -1 none                            */
     hal_f32 play_time;      /* seconds                            */
@@ -542,7 +546,11 @@ static void batch_done(char *path, void *user) {
         hal_object_set_mesh(one, id, hal_mesh_clone(obj->mesh));
         snprintf(out, sizeof(out), "%s/%s_%03zu.glb", dir, prefix,
                  exported + 1);
-        if (hal_io_gltf_export(one, out, err, sizeof(err)) == HAL_OK)
+        hal_gltf_export_opts opts = hal_gltf_export_opts_default();
+        opts.z_up = app->export_z_up;
+        opts.unit_scale = app->export_cm ? 100.0f : 1.0f;
+        if (hal_io_gltf_export_ex(one, out, &opts, err,
+                                  sizeof(err)) == HAL_OK)
             exported++;
         hal_scene_destroy(one);
     }
@@ -585,6 +593,82 @@ static void tex_done(char *path, void *user) {
     else
         set_status(app, "Texture: cannot decode %s", path);
     app->dirty = true;
+    free(path);
+}
+
+/* Box collider export: the selected object's WORLD axis-aligned
+ * bounding box as a one-box glTF scene (the standard simple collider
+ * for game engines; convex hulls are future work — PROGRESS.md). */
+static void collider_done(char *path, void *user) {
+    hal_app *app = user;
+    if (!path) {
+        set_status(app, "Collider export cancelled");
+        return;
+    }
+    hal_object *obj =
+        hal_scene_object(app->scene, hal_scene_selected(app->scene));
+    if (!obj || !obj->mesh) {
+        set_status(app, "Collider: select a mesh object");
+        free(path);
+        return;
+    }
+    hal_vec3f bmin = hal_vec3f_make(1e30f, 1e30f, 1e30f);
+    hal_vec3f bmax = hal_vec3f_make(-1e30f, -1e30f, -1e30f);
+    hal_mat4f world = hal_object_world_matrix(app->scene, obj);
+    for (size_t v = 0; v < obj->mesh->vert_count; v++) {
+        hal_vec3f p = hal_mat4f_transform_point(world,
+                                                obj->mesh->verts[v]);
+        bmin.x = fminf(bmin.x, p.x);
+        bmin.y = fminf(bmin.y, p.y);
+        bmin.z = fminf(bmin.z, p.z);
+        bmax.x = fmaxf(bmax.x, p.x);
+        bmax.y = fmaxf(bmax.y, p.y);
+        bmax.z = fmaxf(bmax.z, p.z);
+    }
+    hal_vec3f size = hal_vec3f_sub(bmax, bmin);
+    hal_vec3f center = hal_vec3f_mul(hal_vec3f_add(bmin, bmax), 0.5f);
+
+    hal_scene *one = hal_scene_create("Collider");
+    hal_object_id id = hal_scene_object_add(one, obj->name,
+                                            HAL_OBJECT_MESH);
+    /* A box mesh from the bounds: 8 corners, 6 quads. */
+    hal_mesh *box = hal_mesh_create();
+    hal_f32 hx = size.x * 0.5f, hy = size.y * 0.5f,
+            hz = size.z * 0.5f;
+    hal_vec3f c[8] = {
+        { -hx, -hy, -hz }, { hx, -hy, -hz }, { hx, -hy, hz },
+        { -hx, -hy, hz },  { -hx, hy, -hz }, { hx, hy, -hz },
+        { hx, hy, hz },    { -hx, hy, hz },
+    };
+    for (int i = 0; i < 8; i++)
+        hal_mesh_vert_add(box, c[i]);
+    /* Outward windings (same layout as hal_mesh_cube). */
+    hal_u32 q0[4] = { 0, 1, 2, 3 };
+    hal_u32 q1[4] = { 7, 6, 5, 4 };
+    hal_u32 q2[4] = { 4, 5, 1, 0 };
+    hal_u32 q3[4] = { 5, 6, 2, 1 };
+    hal_u32 q4[4] = { 6, 7, 3, 2 };
+    hal_u32 q5[4] = { 7, 4, 0, 3 };
+    hal_mesh_face_add(box, q0, 4);
+    hal_mesh_face_add(box, q1, 4);
+    hal_mesh_face_add(box, q2, 4);
+    hal_mesh_face_add(box, q3, 4);
+    hal_mesh_face_add(box, q4, 4);
+    hal_mesh_face_add(box, q5, 4);
+    hal_mesh_rebuild_edges(box);
+    hal_object_set_mesh(one, id, box);
+    hal_object_set_location(one, id, center);
+
+    char err[256] = { 0 };
+    hal_gltf_export_opts opts = hal_gltf_export_opts_default();
+    opts.z_up = app->export_z_up;
+    opts.unit_scale = app->export_cm ? 100.0f : 1.0f;
+    hal_result r =
+        hal_io_gltf_export_ex(one, path, &opts, err, sizeof(err));
+    set_status(app, r == HAL_OK ? "Collider exported to %s"
+                                : "Collider export failed",
+               r == HAL_OK ? path : (err[0] ? err : "I/O error"));
+    hal_scene_destroy(one);
     free(path);
 }
 
@@ -647,8 +731,13 @@ static void export_done(char *path, void *user) {
     }
     char err[256] = { 0 };
     hal_result r = HAL_ERR_IO;
-    if (format == 0)
-        r = hal_io_gltf_export(app->scene, path, err, sizeof(err));
+    if (format == 0) {
+        hal_gltf_export_opts opts = hal_gltf_export_opts_default();
+        opts.z_up = app->export_z_up;
+        opts.unit_scale = app->export_cm ? 100.0f : 1.0f;
+        r = hal_io_gltf_export_ex(app->scene, path, &opts, err,
+                                  sizeof(err));
+    }
     else if (format == 1)
         r = hal_io_obj_export(app->scene, path, err, sizeof(err));
     else if (format == 2)
@@ -741,6 +830,12 @@ static void build_menus(hal_app *app) {
                       menu_action, app);
     hal_menu_item_add(bar, file, "Batch Export glTF (per object)...",
                       NULL, menu_action, app);
+    hal_menu_item_add(bar, file, "Export glTF: Z-Up", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, file, "Export glTF: Centimeters", NULL,
+                      menu_action, app);
+    hal_menu_item_add(bar, file, "Export Box Collider (.glb)...",
+                      NULL, menu_action, app);
     hal_menu_item_add(bar, file, NULL, NULL, NULL, NULL);
     hal_menu_item_add(bar, file, "Quit", "Ctrl+Q", menu_action, app);
 
@@ -789,6 +884,9 @@ static void build_menus(hal_app *app) {
                       menu_action, app);
     hal_menu_item_add(bar, edit, "Solve IK (tip to mouse)", NULL,
                       menu_action, app);
+    hal_menu_item_add(bar, edit, NULL, NULL, NULL, NULL);
+    hal_menu_item_add(bar, edit, "Generate LOD", NULL, menu_action,
+                      app);
 
     int render_menu = hal_menu_add(bar, "Render");
     hal_menu_item_add(bar, render_menu, "Preview PNG...", NULL,
@@ -813,6 +911,14 @@ static void build_menus(hal_app *app) {
     hal_menu_item_add(bar, add, "Cylinder", NULL, menu_action, app);
     hal_menu_item_add(bar, add, "Cone", NULL, menu_action, app);
     hal_menu_item_add(bar, add, "Torus", NULL, menu_action, app);
+    hal_menu_item_add(bar, add, "Preset: Crate", NULL, menu_action,
+                      app);
+    hal_menu_item_add(bar, add, "Preset: Barrel", NULL, menu_action,
+                      app);
+    hal_menu_item_add(bar, add, "Preset: Sword", NULL, menu_action,
+                      app);
+    hal_menu_item_add(bar, add, "Preset: Table", NULL, menu_action,
+                      app);
     hal_menu_item_add(bar, add, "Armature", NULL, menu_action, app);
     hal_menu_item_add(bar, add, "Light", NULL, menu_action, app);
 }
@@ -946,6 +1052,137 @@ static void add_object(hal_app *app, const char *name, hal_object_type type,
     set_status(app, "Added %s", name);
 }
 
+/* Multi-object asset presets (the M9 game workflow). Each builds a
+ * small composition from primitives with sensible materials. */
+static void add_preset(hal_app *app, int which) {
+    if (!app)
+        return;
+    switch (which) {
+    case 0: { /* Crate: a wooden cube. */
+        add_object(app, "Crate", HAL_OBJECT_MESH, hal_vec3f_zero());
+        hal_object *o =
+            &app->scene->objects[app->scene->count - 1];
+        hal_object_id id = o->id;
+        hal_material mat = hal_material_default();
+        strcpy(mat.name, "Wood");
+        mat.base_color = hal_color_rgb8(0x9C, 0x6B, 0x3F);
+        mat.roughness = 0.85f;
+        hal_object_set_material(
+            app->scene, id,
+            hal_scene_material_add(app->scene, &mat));
+        (void)o;
+        break;
+    }
+    case 1: { /* Barrel: a cylinder with a metal band material. */
+        add_object(app, "Barrel", HAL_OBJECT_MESH,
+                   hal_vec3f_zero());
+        hal_object *o =
+            &app->scene->objects[app->scene->count - 1];
+        hal_object_id id = o->id;
+        if (o && o->mesh) {
+            hal_mesh *m = hal_mesh_cylinder(0.45f, 1.2f, 16);
+            hal_object_set_mesh(app->scene, id, m);
+            hal_object_set_location(app->scene, id,
+                                    hal_vec3f_make(0, 0.6f, 0));
+        }
+        hal_material mat = hal_material_default();
+        strcpy(mat.name, "BarrelSteel");
+        mat.base_color = hal_color_rgb8(0x5E, 0x66, 0x6E);
+        mat.metallic = 0.7f;
+        mat.roughness = 0.35f;
+        hal_object_set_material(
+            app->scene, id,
+            hal_scene_material_add(app->scene, &mat));
+        break;
+    }
+    case 2: { /* Sword: blade + guard + handle. */
+        add_object(app, "Blade", HAL_OBJECT_MESH, hal_vec3f_zero());
+        hal_object *ob =
+            &app->scene->objects[app->scene->count - 1];
+        hal_object_id blade = ob->id;
+        if (ob && ob->mesh) {
+            hal_mesh *m = hal_mesh_create();
+            hal_f32 w = 0.06f, t = 0.015f, len = 1.0f;
+            hal_vec3f c[8] = {
+                { -w, 0, -t }, { w, 0, -t }, { w, 0, t }, { -w, 0, t },
+                { -w * 0.4f, len, -t * 0.4f },
+                { w * 0.4f, len, -t * 0.4f },
+                { w * 0.4f, len, t * 0.4f },
+                { -w * 0.4f, len, t * 0.4f },
+            };
+            for (int i = 0; i < 8; i++)
+                hal_mesh_vert_add(m, c[i]);
+            hal_u32 q[6][4] = {
+                { 0, 3, 7, 4 }, { 1, 5, 6, 2 }, { 0, 1, 2, 3 },
+                { 4, 7, 6, 5 }, { 0, 4, 5, 1 }, { 3, 2, 6, 7 },
+            };
+            for (int i = 0; i < 6; i++)
+                hal_mesh_face_add(m, q[i], 4);
+            hal_mesh_rebuild_edges(m);
+            hal_object_set_mesh(app->scene, blade, m);
+            hal_object_set_location(app->scene, blade,
+                                    hal_vec3f_make(0, 0.12f, 0));
+        }
+        hal_material mm = hal_material_default();
+        strcpy(mm.name, "Steel");
+        mm.base_color = hal_color_rgb8(0xC8, 0xCC, 0xD4);
+        mm.metallic = 0.9f;
+        mm.roughness = 0.2f;
+        hal_object_set_material(
+            app->scene, blade,
+            hal_scene_material_add(app->scene, &mm));
+
+        add_object(app, "Guard", HAL_OBJECT_MESH,
+                   hal_vec3f_make(0, 0.08f, 0));
+        hal_object *og =
+            &app->scene->objects[app->scene->count - 1];
+        hal_object_id guard = og->id;
+        if (og && og->mesh)
+            hal_object_set_mesh(app->scene, guard,
+                                hal_mesh_cube(0.16f));
+        hal_object_set_scale(app->scene, guard,
+                             hal_vec3f_make(3.2f, 0.25f, 0.6f));
+        add_object(app, "Handle", HAL_OBJECT_MESH,
+                   hal_vec3f_make(0, -0.12f, 0));
+        hal_object *oh =
+            &app->scene->objects[app->scene->count - 1];
+        if (oh && oh->mesh)
+            hal_object_set_mesh(app->scene, oh->id,
+                                hal_mesh_cylinder(0.025f, 0.24f, 8));
+        break;
+    }
+    default: { /* Table: 4 legs + a top. */
+        add_object(app, "TableTop", HAL_OBJECT_MESH,
+                   hal_vec3f_make(0, 0.72f, 0));
+        hal_object *ot =
+            &app->scene->objects[app->scene->count - 1];
+        hal_object_id top = ot->id;
+        if (ot && ot->mesh)
+            hal_object_set_mesh(app->scene, top,
+                                hal_mesh_cube(0.5f));
+        hal_object_set_scale(app->scene, top,
+                             hal_vec3f_make(1.6f, 0.06f, 0.9f));
+        for (int i = 0; i < 4; i++) {
+            hal_f32 lx = i & 1 ? 0.7f : -0.7f;
+            hal_f32 lz = i & 2 ? 0.35f : -0.35f;
+            char name[32];
+            snprintf(name, sizeof(name), "Leg%d", i + 1);
+            add_object(app, name, HAL_OBJECT_MESH,
+                       hal_vec3f_make(lx, 0.35f, lz));
+            hal_object *ol =
+                &app->scene->objects[app->scene->count - 1];
+            if (ol && ol->mesh)
+                hal_object_set_mesh(app->scene, ol->id,
+                                    hal_mesh_cylinder(0.045f, 0.7f, 8));
+        }
+        break;
+    }
+    }
+    app->dirty = true;
+    rebuild_outliner(app);
+    set_status(app, "Preset added");
+}
+
 /* The Add menu's mesh-producing names, in menu order. */
 static const char *ADD_NAMES[6] = { "Cube", "Sphere", "Plane",
                                     "Cylinder", "Cone", "Torus" };
@@ -994,7 +1231,27 @@ static void menu_action(hal_widget *menubar, int menu, int item,
                     "object.glb", batch_done, app, app->window)))
                 set_status(app, "Choose the batch output location...");
             break;
+        case 10:
+            app->export_z_up = !app->export_z_up;
+            set_status(app, "glTF export up-axis: %s",
+                       app->export_z_up ? "Z-up (+90 X baked into "
+                                          "roots)"
+                                        : "Y-up (glTF native)");
+            break;
         case 11:
+            app->export_cm = !app->export_cm;
+            set_status(app, "glTF export units: %s",
+                       app->export_cm ? "centimeters (x100)"
+                                      : "meters");
+            break;
+        case 12:
+            if (hal_ok(hal_dialog_save_file(
+                    app->platform, "Export box collider", "*.glb",
+                    "collider.glb", collider_done, app,
+                    app->window)))
+                set_status(app, "Choose the collider output...");
+            break;
+        case 14:
             hal_app_quit(app);
             break;
         default:
@@ -1334,6 +1591,36 @@ static void menu_action(hal_widget *menubar, int menu, int item,
                 hal_mesh_select_all(obj->mesh, false);
             break;
         }
+        case 38: {
+            /* Generate LOD: a decimated clone as a new object. */
+            hal_object *obj = hal_scene_object(
+                app->scene, hal_scene_selected(app->scene));
+            if (!obj || !obj->mesh) {
+                set_status(app, "Generate LOD: select a mesh object");
+                break;
+            }
+            hal_vec3f bmin, bmax;
+            hal_mesh_bounds(obj->mesh, &bmin, &bmax);
+            hal_f32 diag = hal_vec3f_distance(bmin, bmax);
+            hal_mesh *lod = hal_mesh_clone(obj->mesh);
+            if (lod && hal_mesh_decimate_cluster(lod, diag / 8.0f)) {
+                char name[128];
+                snprintf(name, sizeof(name), "%s_LOD", obj->name);
+                hal_object_id id = hal_scene_object_add(
+                    app->scene, name, HAL_OBJECT_MESH);
+                hal_object_set_location(app->scene, id,
+                                        obj->location);
+                hal_object_set_mesh(app->scene, id, lod);
+                rebuild_outliner(app);
+                set_status(app, "LOD: %s (%zu verts -> %zu)", name,
+                           obj->mesh->vert_count, lod->vert_count);
+                app->dirty = true;
+            } else {
+                hal_mesh_destroy(lod);
+                set_status(app, "Generate LOD: nothing to simplify");
+            }
+            break;
+        }
         default:
             break;
         }
@@ -1427,7 +1714,9 @@ static void menu_action(hal_widget *menubar, int menu, int item,
         if (item <= 5) {
             add_object(app, ADD_NAMES[item],
                        HAL_OBJECT_MESH, hal_vec3f_zero());
-        } else if (item == 6) {
+        } else if (item >= 6 && item <= 9) {
+            add_preset(app, item - 6);
+        } else if (item == 10) {
             hal_object_id id = hal_scene_object_add(app->scene,
                                                     "Armature",
                                                     HAL_OBJECT_ARMATURE);
@@ -1437,14 +1726,13 @@ static void menu_action(hal_widget *menubar, int menu, int item,
             app->dirty = true;
             rebuild_outliner(app);
             set_status(app, "Added Armature (Tab to pose)");
-        } else if (item == 7) {
+        } else if (item == 11) {
             add_object(app, "Light", HAL_OBJECT_LIGHT,
                        hal_vec3f_make(2.0f, 3.0f, 2.0f));
         }
     }
 }
 
-/* The Add menu's mesh-producing names, in menu order. */
 /* ---- Lifecycle ---- */
 
 hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
