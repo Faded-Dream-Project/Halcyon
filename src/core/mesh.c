@@ -273,11 +273,12 @@ hal_mesh *hal_mesh_sphere(hal_f32 radius, int rings, int segments) {
     /* North cap triangles (CCW seen from outside, +Y up). */
     for (int s = 0; s < segments; s++)
         tri(m, north, SPH(1, s + 1), SPH(1, s));
-    /* Middle quads. */
+    /* Middle quads: (theta-tangent) x (phi-tangent) points outward
+     * (verified analytically at the equator; see test_mesh). */
     for (int r = 1; r < rings - 1; r++)
         for (int s = 0; s < segments; s++)
-            quad(m, SPH(r, s), SPH(r + 1, s), SPH(r + 1, s + 1),
-                 SPH(r, s + 1));
+            quad(m, SPH(r, s), SPH(r, s + 1), SPH(r + 1, s + 1),
+                 SPH(r + 1, s));
     /* South cap triangles. */
     for (int s = 0; s < segments; s++)
         tri(m, south, SPH(rings - 1, s), SPH(rings - 1, s + 1));
@@ -323,11 +324,11 @@ hal_mesh *hal_mesh_cylinder(hal_f32 radius, hal_f32 height, int segments) {
 
 #define CYL(ring, s) ((hal_u32)((ring) * segments + ((s) % segments)))
     for (int s = 0; s < segments; s++)
-        quad(m, CYL(0, s), CYL(0, s + 1), CYL(1, s + 1), CYL(1, s));
+        quad(m, CYL(0, s), CYL(1, s), CYL(1, s + 1), CYL(0, s + 1));
     for (int s = 0; s < segments; s++)
-        tri(m, top_center, CYL(1, s), CYL(1, s + 1));
+        tri(m, top_center, CYL(1, s + 1), CYL(1, s));
     for (int s = 0; s < segments; s++)
-        tri(m, bot_center, CYL(0, s + 1), CYL(0, s));
+        tri(m, bot_center, CYL(0, s), CYL(0, s + 1));
 #undef CYL
     return m;
 }

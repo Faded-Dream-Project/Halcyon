@@ -112,15 +112,17 @@ static void test_sphere(void) {
     for (size_t i = 0; i < m->vert_count; i++)
         HAL_TEST_CHECK_EQ_F(hal_vec3f_length(m->verts[i]), 1.0f, 1e-4);
 
-    /* Smooth sphere normals: unit length. KNOWN ISSUE (recorded in
-     * PROGRESS.md): the sphere primitive's face winding still makes
-     * some smooth normals point inward — an M4 fix on the primitives
-     * pass; flat shading (what M3 renders with) is unaffected. */
+    /* Smooth sphere normals: unit length and radial (the winding fix
+     * this session pinned; area weighting makes them near-radial, so
+     * the dot bound is 0.99, not 1.0). */
     const hal_vec3f *vn = hal_mesh_vert_normals(m);
     HAL_TEST_CHECK(vn != NULL);
     if (vn)
-        for (size_t i = 0; i < m->vert_count; i++)
+        for (size_t i = 0; i < m->vert_count; i++) {
             HAL_TEST_CHECK_EQ_F(hal_vec3f_length(vn[i]), 1.0f, 1e-3);
+            hal_vec3f radial = hal_vec3f_normalize(m->verts[i]);
+            HAL_TEST_CHECK(hal_vec3f_dot(vn[i], radial) > 0.99f);
+        }
 
     hal_mesh_destroy(m);
 }
@@ -142,6 +144,32 @@ static void test_other_primitives(void) {
         HAL_TEST_CHECK_EQ_I(cyl->vert_count, 8 * 2 + 2);
         /* side quads + 2 tri caps */
         HAL_TEST_CHECK_EQ_I(cyl->face_count, 8 + 16);
+        /* Every face normal points away from the axis. */
+        const hal_vec3f *cfn = hal_mesh_face_normals(cyl);
+        HAL_TEST_CHECK(cfn != NULL);
+        for (size_t f = 0; f < cyl->face_count; f++) {
+            hal_vec3f centroid = hal_vec3f_zero();
+            size_t start = cyl->face_off[f];
+            size_t count = cyl->face_off[f + 1] - start;
+            for (size_t i = 0; i < count; i++)
+                centroid = hal_vec3f_add(centroid,
+                                         cyl->verts[cyl->loops[start + i]]);
+            centroid = hal_vec3f_mul(centroid, 1.0f / (hal_f32)count);
+            /* Caps are the faces lying on y = ±hy: normal must be
+             * ±Y. Everything else is a side face: normal radial. */
+            bool on_cap = fabsf(fabsf(centroid.y) - 1.0f) < 0.01f;
+            if (on_cap) {
+                hal_f32 want = centroid.y > 0.0f ? 1.0f : -1.0f;
+                HAL_TEST_CHECK(cfn[f].y * want > 0.5f);
+            } else {
+                hal_vec3f out = hal_vec3f_make(centroid.x, 0.0f,
+                                               centroid.z);
+                HAL_TEST_CHECK(hal_vec3f_length_sq(out) > 1e-9f);
+                HAL_TEST_CHECK(hal_vec3f_dot(
+                                   cfn[f], hal_vec3f_normalize(out)) >
+                               0.5f);
+            }
+        }
         hal_mesh_destroy(cyl);
     }
 

@@ -95,11 +95,18 @@ static void test_frustum_culling(void) {
     /* Far behind the camera: out. */
     HAL_TEST_CHECK(!hal_frustum_sphere_visible(
         &f, hal_vec3f_make(0.0f, 0.0f, cam.distance * 3.0f), 0.5f));
-    /* NOTE: far-plane culling for the [0,1] NDC convention is not
-     * yet verified (the plane extraction needs a dedicated test);
-     * near/side culling is pinned below. */
+    /* Far-plane culling ([0,1] NDC: plane = row3 - row2, normalized
+     * into world units). A point along the VIEW axis beyond far_z is
+     * out — measured along the axis, not world Z (the old test point
+     * was 458 view-units away with far=500: inside, test was wrong). */
+    hal_vec3f fwd = hal_vec3f_normalize(
+        hal_vec3f_sub(cam.target, hal_camera_eye(&cam)));
+    hal_vec3f beyond = hal_vec3f_add(hal_camera_eye(&cam),
+                                     hal_vec3f_mul(fwd, 1000.0f));
+    HAL_TEST_CHECK(!hal_frustum_sphere_visible(&f, beyond, 0.5f));
+    /* ...and a point near the target is in. */
     HAL_TEST_CHECK(hal_frustum_sphere_visible(
-        &f, hal_vec3f_make(0.0f, 0.0f, -50.0f), 0.5f));
+        &f, hal_vec3f_make(0.0f, 0.0f, -1.0f), 0.5f));
     /* Far off to the side: out. */
     HAL_TEST_CHECK(!hal_frustum_sphere_visible(
         &f, hal_vec3f_make(500.0f, 0.0f, 0.0f), 1.0f));
