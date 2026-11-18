@@ -512,6 +512,45 @@ case; noted below).
   (test_project_armature_round_trip now binds weights before saving
   and asserts they survive the round trip).
 
+### Implemented and tested — robust glTF import (session 4)
+
+- FOREIGN RIGS, EXACT: hal_bone gains rest_offset (a local rest
+  rotation; identity = native). pose_build's REST matrix becomes
+  T(parent_rest * head) * R(rest_offset) — for foreign files the
+  offset accumulates the file's joint rest rotations, so the in-app
+  bind equals the file's node-chain rest and the file's
+  inverseBindMatrices are reproduced exactly (foreign skinned meshes
+  import with identity object TRS, matching glTF's "node transform
+  ignored for skinned meshes" rule; Halcyon's own exports keep their
+  mesh transform — the importer branches on the asset generator
+  string). The root-recovery now un-rotates the root joint's local
+  rotation. Rest offsets persist (additive "restoff" lines).
+- Joint orderings: child-before-parent joints (legal glTF) defer
+  parent links to a two-phase create + a topological offset fix-up.
+  BUG FIXED (found by the fixture): hal_armature_bone_add rejected
+  bones whose parent index did not exist yet, leaving arm->bones
+  NULL and the importer writing through it — a real crash.
+- Materials/textures: pbrMetallicRoughness (baseColorFactor,
+  metallic, roughness, baseColorTexture) maps onto Halcyon
+  materials. Images resolve three ways: embedded bufferView bytes
+  and data: URIs (base64) are sniffed (PNG/JPEG magic) and written
+  to <glb>-textures/ next to the source; plain URIs resolve
+  relative to it. BUG FIXED: byteOffset/byteLength were read with
+  json_num (an ARRAY-ELEMENT helper) and silently defaulted to 0 —
+  embedded images never extracted.
+- Multi-primitive meshes: ALL primitives merge into one Halcyon
+  mesh (per-primitive vert offsets; per-corner TEXCOORD_0 rides the
+  loops; JOINTS_0/WEIGHTS_0 merge with offsets; primitive 0's
+  material represents the merged mesh — multi-material meshes
+  merge geometry, documented).
+- Tests (test_gltf_foreign, 45 checks): a minimal GLB WRITER builds
+  fixtures in three conventions — parent-relative joints with rest
+  rotations (import + pose + numeric comparison against the
+  analytic sum(w * G(t) * IBM * v)), child-before-parent ordering
+  (offset topology), and material + embedded/data-URI textures +
+  two-primitive merge (factors, UVs, extraction on disk, decode
+  through the texture cache).
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -565,6 +604,13 @@ case; noted below).
 
 ## Log
 
+- **2026-11-18 — session 4, item 1: robust glTF import.** Foreign
+  rigs exact via bone rest offsets (analytically verified against
+  hand-built fixtures); materials + textures (embedded, data-URI,
+  external) import; multi-primitive meshes merge. Two real bugs
+  fixed with regressions: child-before-parent joint crash, and
+  bufferView fields read with the wrong JSON helper. 2231 headless
+  checks total.
 - **2026-11-18 — session 3, item 7: v0.1.0.** README with
   screenshots (the editor + a posed character render through the
   example project), the tested feature list, known limitations;

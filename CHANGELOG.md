@@ -4,6 +4,20 @@ The format follows keep-a-changelog (Added / Changed / Fixed /
 Removed); dates are ISO. Everything listed here is built and tested —
 PROGRESS.md carries the honest ledger of what is NOT done yet.
 
+## [Unreleased]
+
+### Added — robust glTF import (2026-11-18, session 4)
+
+- Foreign rigs import EXACTLY: bones carry rest offsets (the file's
+  joint rest rotations) so bind matrices equal the file's node-chain
+  rest — verified analytically against hand-built foreign fixtures,
+  including child-before-parent joint orderings (which fixed a real
+  import crash).
+- Materials import (pbrMetallicRoughness); textures import embedded
+  (bufferView), as data: URIs, and as external files (extracted to
+  <glb>-textures/); multi-primitive meshes merge with UVs and skin
+  influences.
+
 ## [v0.1.0] — 2026-11-18
 
 The first usable release: modeling, materials/UVs with textures,

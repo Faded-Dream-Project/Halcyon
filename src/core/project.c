@@ -168,6 +168,19 @@ hal_result hal_project_save(const hal_scene *scene, const char *path,
                              (double)bone->pose.y,
                              (double)bone->pose.z,
                              (double)bone->pose.w) > 0;
+                /* Foreign-rig rest rotations (additive; absent =
+                 * identity for native rigs). */
+                hal_quatf idq = hal_quatf_identity();
+                if (bone->rest_offset.x != idq.x ||
+                    bone->rest_offset.y != idq.y ||
+                    bone->rest_offset.z != idq.z ||
+                    bone->rest_offset.w != idq.w)
+                    ok = ok &&
+                         fprintf(f, "  restoff %d %.9g %.9g %.9g %.9g\n",
+                                 (int)b, (double)bone->rest_offset.x,
+                                 (double)bone->rest_offset.y,
+                                 (double)bone->rest_offset.z,
+                                 (double)bone->rest_offset.w) > 0;
             }
         }
         if (o->mesh) {
@@ -686,6 +699,32 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 goto done;
             }
             obj->skin_armature = skin;
+        } else if (strcmp(key, "restoff") == 0) {
+            hal_object *obj = hal_scene_object(scene, current);
+            if (!obj || !obj->armature) {
+                set_err(err, err_cap,
+                        "line %d: restoff outside an armature",
+                        line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            hal_u32 bi = 0;
+            hal_f32 q[4];
+            bool ok_line = parse_u32(&p, &bi);
+            for (int i = 0; ok_line && i < 4; i++)
+                ok_line = parse_float(&p, &q[i]);
+            if (!ok_line || !expect_end_of_line(&p) ||
+                bi >= obj->armature->count) {
+                set_err(err, err_cap,
+                        "line %d: restoff wants: bone x y z w",
+                        line_no);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            obj->armature->bones[bi].rest_offset =
+                hal_quatf_make(q[0], q[1], q[2], q[3]);
         } else if (strcmp(key, "bone") == 0) {
             hal_object *obj = hal_scene_object(scene, current);
             if (!obj || !obj->armature) {

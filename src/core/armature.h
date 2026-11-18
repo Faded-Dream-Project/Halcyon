@@ -37,6 +37,11 @@ typedef struct hal_bone {
     hal_vec3f tail;      /* rest, armature space                  */
     hal_i32 parent;      /* bone index or -1                      */
     hal_quatf pose;      /* local pose rotation (identity = rest) */
+    /* Local REST rotation for imported foreign rigs whose joints
+     * carry rest rotations (glTF node rotations): the bind matrix
+     * becomes T(head) * R(rest_offset * ... accumulated). Identity
+     * for native Halcyon rigs (pure-translation binds). */
+    hal_quatf rest_offset;
     bool selected;
 } hal_bone;
 

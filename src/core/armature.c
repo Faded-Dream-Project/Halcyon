@@ -40,6 +40,7 @@ int hal_armature_bone_add(hal_armature *arm, const char *name,
     b->tail = tail;
     b->parent = parent;
     b->pose = hal_quatf_identity();
+    b->rest_offset = hal_quatf_identity();
     arm->count++;
     return (int)arm->count - 1;
 }
@@ -79,14 +80,17 @@ static void pose_build(const hal_armature *arm, hal_bone_pose *out,
                            : hal_mat4f_identity();
         p->head = hal_mat4f_transform_point(parent_m, b->head);
         hal_vec3f rest_dir = hal_vec3f_sub(b->tail, b->head);
-        /* The REST pose ignores bone rotations entirely (bind
-         * matrices must be the unposed chain); the POSED chain
-         * composes the ancestors' pose quats with the local one. */
+        /* The REST matrix carries only the (accumulated) rest offset
+         * — never the POSE; the POSED chain composes the ancestors'
+         * pose quats with the local one. Native rigs have identity
+         * offsets (pure-translation binds); foreign imports
+         * accumulate the file's joint rest rotations so the bind
+         * equals the file's node-chain rest exactly. */
         hal_quatf total =
             apply_pose
                 ? hal_quatf_mul(chain_rotation(arm, out, b->parent),
                                 b->pose)
-                : hal_quatf_identity();
+                : b->rest_offset;
         hal_vec3f dir = hal_quatf_rotate_vec3(total, rest_dir);
         p->tail = hal_vec3f_add(p->head, dir);
 

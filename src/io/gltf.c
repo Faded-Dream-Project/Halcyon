@@ -26,6 +26,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 /* ---- Growable byte/string buffer ---- */
 
@@ -1802,6 +1804,8 @@ typedef struct imp_ctx {
     hal_object_id *node_obj; /* per node index, 0 = none   */
     int *node_skin;          /* per node index, -1 = none  */
     size_t node_count;
+    int *mat_map;            /* glTF material idx -> scene */
+    size_t mat_map_count;
 } imp_ctx;
 
 static bool collect_nodes(const hal_json *nodes, size_t index,
@@ -1856,26 +1860,6 @@ static bool collect_nodes(const hal_json *nodes, size_t index,
                    mi);
             return false;
         }
-        /* First primitive only (Halcyon's own exports have exactly
-         * one; multi-primitive meshes import their first). */
-        const hal_json *prim = prims->items[0];
-        const hal_json *attrs = json_get(prim, "attributes");
-        const hal_json *pos_ref = json_get(attrs, "POSITION");
-        if (!pos_ref || pos_ref->type != HAL_JSON_NUMBER) {
-            io_err(err, err_cap, "glTF: primitive without POSITION");
-            return false;
-        }
-
-        acc_info pos;
-        if (!read_accessor(accessors, (size_t)pos_ref->number, views,
-                           g, &pos, err, err_cap))
-            return false;
-        if (pos.component_type != 5126 || pos.vec_len != 3) {
-            io_err(err, err_cap,
-                   "glTF: POSITION must be FLOAT VEC3");
-            return false;
-        }
-
         const hal_json *name = json_get(n, "name");
         hal_object_id id = hal_scene_object_add(
             scene, name && name->type == HAL_JSON_STRING ? name->string
@@ -1887,69 +1871,215 @@ static bool collect_nodes(const hal_json *nodes, size_t index,
             io_err(err, err_cap, "out of memory");
             return false;
         }
-        for (size_t v = 0; v < pos.count; v++)
-            hal_mesh_vert_add(m, hal_vec3f_make(
-                                     (hal_f32)acc_read(g, &pos, v, 0),
-                                     (hal_f32)acc_read(g, &pos, v, 1),
-                                     (hal_f32)acc_read(g, &pos, v, 2)));
 
-        const hal_json *idx_ref = json_get(prim, "indices");
-        if (idx_ref && idx_ref->type == HAL_JSON_NUMBER) {
-            acc_info idx;
-            if (!read_accessor(accessors, (size_t)idx_ref->number,
-                               views, g, &idx, err, err_cap))
-                return false;
-            for (size_t t2 = 0; t2 + 2 < idx.count; t2 += 3) {
-                hal_u32 tri[3];
-                tri[0] = (hal_u32)acc_read(g, &idx, t2, 0);
-                tri[1] = (hal_u32)acc_read(g, &idx, t2 + 1, 0);
-                tri[2] = (hal_u32)acc_read(g, &idx, t2 + 2, 0);
-                hal_mesh_face_add(m, tri, 3);
+        /* ALL primitives merge into one Halcyon mesh (verts offset
+         * per primitive). Per-corner UVs ride the loops; skin
+         * influences merge per MESH vert. */
+        hal_vec2f *uv_corners = NULL;
+        size_t uv_corner_count = 0, uv_corner_cap = 0;
+        bool any_failed_prim = false;
+        int first_material = -1;
+
+        for (size_t pi = 0; pi < prims->count; pi++) {
+            const hal_json *prim = prims->items[pi];
+            const hal_json *attrs = json_get(prim, "attributes");
+            const hal_json *pos_ref = json_get(attrs, "POSITION");
+            if (!pos_ref || pos_ref->type != HAL_JSON_NUMBER) {
+                io_err(err, err_cap,
+                       "glTF: primitive without POSITION");
+                any_failed_prim = true;
+                break;
             }
+            acc_info pos;
+            if (!read_accessor(accessors, (size_t)pos_ref->number,
+                               views, g, &pos, err, err_cap)) {
+                any_failed_prim = true;
+                break;
+            }
+            if (pos.component_type != 5126 || pos.vec_len != 3) {
+                io_err(err, err_cap,
+                       "glTF: POSITION must be FLOAT VEC3");
+                any_failed_prim = true;
+                break;
+            }
+
+            size_t vert_base = m->vert_count;
+            for (size_t v = 0; v < pos.count; v++)
+                hal_mesh_vert_add(m, hal_vec3f_make(
+                                       (hal_f32)acc_read(g, &pos, v, 0),
+                                       (hal_f32)acc_read(g, &pos, v, 1),
+                                       (hal_f32)acc_read(g, &pos, v, 2)));
+
+            /* Per-corner UVs (TEXCOORD_0), aligned with the corner
+             * order the faces are added in below. */
+            acc_info uvs;
+            bool has_uvs = false;
+            const hal_json *uv_ref = json_get(attrs, "TEXCOORD_0");
+            if (uv_ref && uv_ref->type == HAL_JSON_NUMBER &&
+                read_accessor(accessors, (size_t)uv_ref->number, views,
+                              g, &uvs, err, err_cap) &&
+                uvs.vec_len == 2)
+                has_uvs = true;
+
+            const hal_json *idx_ref = json_get(prim, "indices");
+            size_t corner = 0;
+            if (idx_ref && idx_ref->type == HAL_JSON_NUMBER) {
+                acc_info idx;
+                if (!read_accessor(accessors, (size_t)idx_ref->number,
+                                   views, g, &idx, err, err_cap)) {
+                    any_failed_prim = true;
+                    break;
+                }
+                for (size_t t2 = 0; t2 + 2 < idx.count; t2 += 3) {
+                    hal_u32 tri[3];
+                    tri[0] = (hal_u32)acc_read(g, &idx, t2, 0) +
+                             (hal_u32)vert_base;
+                    tri[1] = (hal_u32)acc_read(g, &idx, t2 + 1, 0) +
+                             (hal_u32)vert_base;
+                    tri[2] = (hal_u32)acc_read(g, &idx, t2 + 2, 0) +
+                             (hal_u32)vert_base;
+                    hal_mesh_face_add(m, tri, 3);
+                    for (int c = 0; c < 3; c++) {
+                        hal_vec2f uv = { 0, 0 };
+                        if (has_uvs &&
+                            corner < uvs.count) {
+                            uv.x = (hal_f32)acc_read(g, &uvs, corner, 0);
+                            uv.y = (hal_f32)acc_read(g, &uvs, corner, 1);
+                        }
+                        if (uv_corner_count == uv_corner_cap) {
+                            uv_corner_cap = uv_corner_cap
+                                                ? uv_corner_cap * 2
+                                                : 64;
+                            hal_vec2f *grown = realloc(
+                                uv_corners,
+                                uv_corner_cap * sizeof(*grown));
+                            if (!grown) {
+                                free(uv_corners);
+                                uv_corners = NULL;
+                                uv_corner_count = 0;
+                                uv_corner_cap = 0;
+                                any_failed_prim = true;
+                                break;
+                            }
+                            uv_corners = grown;
+                        }
+                        uv_corners[uv_corner_count++] = uv;
+                        corner++;
+                    }
+                    if (any_failed_prim)
+                        break;
+                }
+            } else {
+                /* Non-indexed: consecutive triples. */
+                for (size_t v = 0; v + 2 < pos.count; v += 3) {
+                    hal_u32 tri[3] = { (hal_u32)v + (hal_u32)vert_base,
+                                       (hal_u32)v + 1 + (hal_u32)vert_base,
+                                       (hal_u32)v + 2 + (hal_u32)vert_base };
+                    hal_mesh_face_add(m, tri, 3);
+                    for (int c = 0; c < 3; c++) {
+                        hal_vec2f uv = { 0, 0 };
+                        if (has_uvs && v + (size_t)c < uvs.count) {
+                            uv.x = (hal_f32)acc_read(
+                                g, &uvs, v + (size_t)c, 0);
+                            uv.y = (hal_f32)acc_read(
+                                g, &uvs, v + (size_t)c, 1);
+                        }
+                        if (uv_corner_count == uv_corner_cap) {
+                            uv_corner_cap = uv_corner_cap
+                                                ? uv_corner_cap * 2
+                                                : 64;
+                            hal_vec2f *grown = realloc(
+                                uv_corners,
+                                uv_corner_cap * sizeof(*grown));
+                            if (!grown) {
+                                free(uv_corners);
+                                uv_corners = NULL;
+                                uv_corner_count = 0;
+                                uv_corner_cap = 0;
+                                any_failed_prim = true;
+                                break;
+                            }
+                            uv_corners = grown;
+                        }
+                        uv_corners[uv_corner_count++] = uv;
+                    }
+                    if (any_failed_prim)
+                        break;
+                }
+            }
+            if (any_failed_prim)
+                break;
+
+            /* Skin influences for THIS primitive's verts (offset by
+             * vert_base). */
+            const hal_json *jnt_ref = json_get(attrs, "JOINTS_0");
+            const hal_json *wgt_ref = json_get(attrs, "WEIGHTS_0");
+            if (jnt_ref && wgt_ref && jnt_ref->type == HAL_JSON_NUMBER &&
+                wgt_ref->type == HAL_JSON_NUMBER) {
+                acc_info jnt, wgt;
+                if (read_accessor(accessors, (size_t)jnt_ref->number,
+                                  views, g, &jnt, err, err_cap) &&
+                    read_accessor(accessors, (size_t)wgt_ref->number,
+                                  views, g, &wgt, err, err_cap) &&
+                    jnt.vec_len == 4 && wgt.vec_len == 4 &&
+                    jnt.count == wgt.count && jnt.count == pos.count) {
+                    if (!m->skin_weights || !m->skin_bones) {
+                        free(m->skin_weights);
+                        free(m->skin_bones);
+                        m->skin_weights = NULL;
+                        m->skin_bones = NULL;
+                    }
+                    size_t total = vert_base + pos.count;
+                    hal_f32 *w = realloc(
+                        m->skin_weights, total * 4 * sizeof(hal_f32));
+                    hal_i32 *b = realloc(
+                        m->skin_bones, total * 4 * sizeof(hal_i32));
+                    if (w && b) {
+                        for (size_t v = 0; v < pos.count; v++)
+                            for (size_t k = 0; k < 4; k++) {
+                                size_t wi = (vert_base + v) * 4 + k;
+                                b[wi] = (hal_i32)acc_read(
+                                    g, &jnt, v, (int)k);
+                                w[wi] = (hal_f32)acc_read(
+                                    g, &wgt, v, (int)k);
+                            }
+                        m->skin_weights = w;
+                        m->skin_bones = b;
+                    }
+                }
+            }
+
+            /* The first primitive's material represents the merged
+             * mesh (multi-material meshes merge geometry). */
+            if (pi == 0) {
+                const hal_json *mat_ref = json_get(prim, "material");
+                if (mat_ref && mat_ref->type == HAL_JSON_NUMBER)
+                    first_material = (int)mat_ref->number;
+            }
+        }
+
+        if (any_failed_prim) {
+            hal_mesh_destroy(m);
+            free(uv_corners);
+            return false;
+        }
+
+        /* Attach the merged per-corner UVs. */
+        if (uv_corners && uv_corner_count == m->loop_count) {
+            free(m->uvs);
+            m->uvs = uv_corners;
+            m->uvs_valid = true;
         } else {
-            /* Non-indexed: consecutive triples. */
-            for (size_t v = 0; v + 2 < pos.count; v += 3) {
-                hal_u32 tri[3] = { (hal_u32)v, (hal_u32)v + 1,
-                                   (hal_u32)v + 2 };
-                hal_mesh_face_add(m, tri, 3);
-            }
+            free(uv_corners);
         }
         hal_mesh_rebuild_edges(m);
 
-        /* Skin influences (JOINTS_0/WEIGHTS_0): values are positions
-         * in the referenced skin's joints array; the skins pass below
-         * maps them onto the rebuilt armature's bone indices. */
-        const hal_json *jnt_ref = json_get(attrs, "JOINTS_0");
-        const hal_json *wgt_ref = json_get(attrs, "WEIGHTS_0");
-        if (jnt_ref && wgt_ref && jnt_ref->type == HAL_JSON_NUMBER &&
-            wgt_ref->type == HAL_JSON_NUMBER) {
-            acc_info jnt, wgt;
-            if (read_accessor(accessors, (size_t)jnt_ref->number,
-                              views, g, &jnt, err, err_cap) &&
-                read_accessor(accessors, (size_t)wgt_ref->number,
-                              views, g, &wgt, err, err_cap) &&
-                jnt.vec_len == 4 && wgt.vec_len == 4 &&
-                jnt.count == wgt.count && jnt.count == pos.count) {
-                hal_f32 *w = calloc(pos.count * 4, sizeof(hal_f32));
-                hal_i32 *b = malloc(pos.count * 4 * sizeof(hal_i32));
-                if (w && b) {
-                    for (size_t v = 0; v < pos.count; v++)
-                        for (size_t k = 0; k < 4; k++) {
-                            b[v * 4 + k] =
-                                (hal_i32)acc_read(g, &jnt, v, (int)k);
-                            w[v * 4 + k] =
-                                (hal_f32)acc_read(g, &wgt, v, (int)k);
-                        }
-                    free(m->skin_weights);
-                    free(m->skin_bones);
-                    m->skin_weights = w;
-                    m->skin_bones = b;
-                } else {
-                    free(w);
-                    free(b);
-                }
-            }
-        }
+        /* The merged mesh's material (from the first primitive). */
+        if (first_material >= 0 && ctx &&
+            (size_t)first_material < ctx->mat_map_count &&
+            ctx->mat_map[first_material] >= 0)
+            hal_object_set_material(scene, id,
+                                    ctx->mat_map[first_material]);
 
         hal_object_set_mesh(scene, id, m);
         if (ctx && index < ctx->node_count)
@@ -2083,6 +2213,21 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
                                                "nodes")
                                     : NULL;
 
+    /* Foreign-vs-native detection: Halcyon's own exports use
+     * armature-space joint translations and pure-translation binds;
+     * foreign files (Blender &c.) use parent-relative joints with
+     * REST ROTATIONS and node-chain binds. The two reconstruct
+     * differently — see the skins pass. */
+    bool foreign_file = true;
+    {
+        const hal_json *asset = json_get(root, "asset");
+        const hal_json *gen =
+            asset ? json_get(asset, "generator") : NULL;
+        if (gen && gen->type == HAL_JSON_STRING &&
+            strncmp(gen->string, "Halcyon", 7) == 0)
+            foreign_file = false;
+    }
+
     /* Import bookkeeping (node -> object / skin). */
     imp_ctx ictx = { 0 };
     size_t node_count = nodes && nodes->type == HAL_JSON_ARRAY
@@ -2098,6 +2243,240 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
             ictx.node_obj[i] = HAL_OBJECT_ID_NONE;
             ictx.node_skin[i] = -1;
         }
+
+    /* ---- Materials / textures / images pre-pass ----
+     * Images resolve in three flavors: embedded bufferView bytes
+     * and data: URIs are written to <glb>-textures/ next to the
+     * file; plain URIs resolve relative to it. Materials map
+     * pbrMetallicRoughness onto Halcyon's materials. */
+    const hal_json *materials_json = json_get(root, "materials");
+    const hal_json *images_json = json_get(root, "images");
+    const hal_json *textures_json = json_get(root, "textures");
+    size_t mat_count =
+        materials_json && materials_json->type == HAL_JSON_ARRAY
+            ? materials_json->count
+            : 0;
+    ictx.mat_map_count = mat_count;
+    ictx.mat_map =
+        malloc((mat_count ? mat_count : 1) * sizeof(int));
+    if (ictx.mat_map)
+        for (size_t i = 0; i < mat_count; i++)
+            ictx.mat_map[i] = -1;
+    else
+        ctx_ok = false;
+
+    /* Extracted image files live next to the source file. */
+    char tex_dir[1024];
+    {
+        const char *slash = strrchr(path, '/');
+        const char *base = slash ? slash + 1 : path;
+        const char *dot = strrchr(base, '.');
+        size_t stem = dot ? (size_t)(dot - base) : strlen(base);
+        if (stem > 400)
+            stem = 400;
+        char dir_part[512] = ".";
+        if (slash) {
+            size_t dl = (size_t)(slash - path);
+            if (dl > 480)
+                dl = 480;
+            memcpy(dir_part, path, dl);
+            dir_part[dl] = 0;
+        }
+        snprintf(tex_dir, sizeof(tex_dir), "%s/%.*s-textures",
+                 dir_part, (int)stem, base);
+    }
+    mkdir(tex_dir, 0755);
+
+    /* image index -> extracted path (malloc'd strings). */
+    char **image_paths = NULL;
+    size_t image_count =
+        images_json && images_json->type == HAL_JSON_ARRAY
+            ? images_json->count
+            : 0;
+    if (image_count > 0) {
+        image_paths = calloc(image_count, sizeof(char *));
+        if (!image_paths)
+            image_count = 0;
+    }
+    for (size_t i = 0; i < image_count; i++) {
+        const hal_json *img = images_json->items[i];
+        const unsigned char *bytes = NULL;
+        bool bytes_heap = false; /* data-URI decode owns it */
+        size_t byte_len = 0;
+        const char *ext = "png";
+
+        const hal_json *bv = json_get(img, "bufferView");
+        if (bv && bv->type == HAL_JSON_NUMBER && g.bin) {
+            const hal_json *views_arr = json_get(root, "bufferViews");
+            if (views_arr && views_arr->type == HAL_JSON_ARRAY &&
+                (size_t)bv->number < views_arr->count) {
+                const hal_json *view =
+                    views_arr->items[(size_t)bv->number];
+                /* byteOffset/byteLength are scalar NUMBERS (json_num
+                 * reads array ELEMENTS — the wrong helper here). */
+                const hal_json *off_node =
+                    json_get(view, "byteOffset");
+                const hal_json *len_node =
+                    json_get(view, "byteLength");
+                double v_off = 0, len = 0;
+                if (off_node && off_node->type == HAL_JSON_NUMBER)
+                    v_off = off_node->number;
+                if (len_node && len_node->type == HAL_JSON_NUMBER)
+                    len = len_node->number;
+                if (len > 0 &&
+                    (size_t)v_off + (size_t)len <= g.bin_len) {
+                    bytes = g.bin + (size_t)v_off;
+                    byte_len = (size_t)len;
+                }
+            }
+        } else {
+            const hal_json *uri = json_get(img, "uri");
+            if (uri && uri->type == HAL_JSON_STRING) {
+                if (strncmp(uri->string, "data:", 5) == 0) {
+                    /* data:image/png;base64,XXXX */
+                    const char *b64 =
+                        strstr(uri->string, ";base64,");
+                    if (b64) {
+                        b64 += 8;
+                        size_t b64_len = strlen(b64);
+                        unsigned char *outb = malloc(
+                            b64_len / 4 * 3 + 4);
+                        if (outb) {
+                            size_t o = 0;
+                            unsigned acc = 0;
+                            int bits = 0;
+                            for (size_t c = 0; c < b64_len; c++) {
+                                char ch = b64[c];
+                                if (ch == '=')
+                                    break;
+                                int val = -1;
+                                if (ch >= 'A' && ch <= 'Z')
+                                    val = ch - 'A';
+                                else if (ch >= 'a' && ch <= 'z')
+                                    val = ch - 'a' + 26;
+                                else if (ch >= '0' && ch <= '9')
+                                    val = ch - '0' + 52;
+                                else if (ch == '+')
+                                    val = 62;
+                                else if (ch == '/')
+                                    val = 63;
+                                if (val < 0)
+                                    continue;
+                                acc = (acc << 6) | (unsigned)val;
+                                bits += 6;
+                                if (bits >= 8) {
+                                    bits -= 8;
+                                    outb[o++] =
+                                        (unsigned char)(acc >> bits);
+                                }
+                            }
+                            bytes = outb;
+                            bytes_heap = true;
+                            byte_len = o;
+                        }
+                    }
+                } else {
+                    /* External file, relative to the glTF. */
+                    char full[1024];
+                    const char *slash = strrchr(path, '/');
+                    if (slash) {
+                        size_t dl = (size_t)(slash - path);
+                        if (dl > 900)
+                            dl = 900;
+                        memcpy(full, path, dl);
+                        full[dl] = 0;
+                        snprintf(full + dl, sizeof(full) - dl,
+                                 "/%s", uri->string);
+                    } else {
+                        snprintf(full, sizeof(full), "%s",
+                                 uri->string);
+                    }
+                    if (access(full, R_OK) == 0) {
+                        image_paths[i] = malloc(strlen(full) + 1);
+                        if (image_paths[i])
+                            strcpy(image_paths[i], full);
+                    }
+                }
+            }
+        }
+
+        if (bytes && byte_len > 0) {
+            /* Sniff the magic for the extension. */
+            if (byte_len >= 3 && bytes[0] == 0x89 &&
+                bytes[1] == 'P' && bytes[2] == 'N')
+                ext = "png";
+            else if (byte_len >= 2 && bytes[0] == 0xFF &&
+                     bytes[1] == 0xD8)
+                ext = "jpg";
+            else
+                ext = NULL; /* unknown type: skip */
+            if (ext) {
+                char file[1100];
+                snprintf(file, sizeof(file),
+                         "%s/tex%zu.%s", tex_dir, i, ext);
+                FILE *out = fopen(file, "wb");
+                if (out) {
+                    if (fwrite(bytes, 1, byte_len, out) == byte_len)
+                        image_paths[i] = strdup(file);
+                    fclose(out);
+                }
+            }
+            if (bytes_heap)
+                free((void *)(size_t)bytes); /* the data-URI decode */
+        }
+    }
+
+    /* texture index -> image index. */
+    size_t tex_count =
+        textures_json && textures_json->type == HAL_JSON_ARRAY
+            ? textures_json->count
+            : 0;
+
+    for (size_t mi = 0; mi < mat_count; mi++) {
+        const hal_json *mat = materials_json->items[mi];
+        const hal_json *pbr = json_get(mat, "pbrMetallicRoughness");
+        hal_material m = hal_material_default();
+        const hal_json *nm = json_get(mat, "name");
+        if (nm && nm->type == HAL_JSON_STRING)
+            snprintf(m.name, sizeof(m.name), "%s", nm->string);
+        if (pbr) {
+            const hal_json *bc = json_get(pbr, "baseColorFactor");
+            if (bc && bc->type == HAL_JSON_ARRAY && bc->count >= 3)
+                m.base_color = hal_color_rgba(
+                    (hal_f32)json_num(bc, 0, 1),
+                    (hal_f32)json_num(bc, 1, 1),
+                    (hal_f32)json_num(bc, 2, 1),
+                    (hal_f32)json_num(bc, 3, 1));
+            const hal_json *mt = json_get(pbr, "metallicFactor");
+            if (mt && mt->type == HAL_JSON_NUMBER)
+                m.metallic = (hal_f32)mt->number;
+            const hal_json *rg = json_get(pbr, "roughnessFactor");
+            if (rg && rg->type == HAL_JSON_NUMBER)
+                m.roughness = (hal_f32)rg->number;
+            const hal_json *bct =
+                json_get(pbr, "baseColorTexture");
+            if (bct && bct->type == HAL_JSON_OBJECT) {
+                const hal_json *tidx = json_get(bct, "index");
+                if (tidx && tidx->type == HAL_JSON_NUMBER &&
+                    (size_t)tidx->number < tex_count) {
+                    const hal_json *tex =
+                        textures_json->items[(size_t)tidx->number];
+                    const hal_json *src = json_get(tex, "source");
+                    if (src && src->type == HAL_JSON_NUMBER &&
+                        (size_t)src->number < image_count &&
+                        image_paths[(size_t)src->number]) {
+                        m.texture = hal_scene_image_add(
+                            scene,
+                            image_paths[(size_t)src->number]);
+                    }
+                }
+            }
+        }
+        ictx.mat_map[mi] = hal_scene_material_add(scene, &m);
+    }
+    for (size_t i = 0; i < image_count; i++)
+        free(image_paths[i]);
+    free(image_paths);
 
     bool ok = ctx_ok;
     if (nodes && nodes->type == HAL_JSON_ARRAY) {
@@ -2299,13 +2678,29 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
                             (hal_f32)json_num(rt, 0, 0),
                             (hal_f32)json_num(rt, 1, 0),
                             (hal_f32)json_num(rt, 2, 0));
-                    /* arm_world = world[root] * T(-head0) */
-                    hal_mat4f arm_world = world[root_node];
+                    /* The armature node's world = the root joint's
+                     * world with the root's OWN local removed:
+                     * A = world[root] * (T(lt) * R(lr))^-1
+                     *   = world[root] * R(lr)^-1 * T(-lt). Halcyon's
+                     * own exports have lr = identity. */
+                    hal_quatf lr = hal_quatf_identity();
+                    const hal_json *rr = json_get(rn, "rotation");
+                    if (rr)
+                        lr = hal_quatf_make(
+                            (hal_f32)json_num(rr, 0, 0),
+                            (hal_f32)json_num(rr, 1, 0),
+                            (hal_f32)json_num(rr, 2, 0),
+                            (hal_f32)json_num(rr, 3, 1));
+                    hal_mat4f unrot =
+                        hal_quatf_to_mat4(
+                            hal_quatf_conjugate(hal_quatf_normalize(lr)));
                     hal_mat4f unshift = hal_mat4f_identity();
                     unshift.m[12] = -head0.x;
                     unshift.m[13] = -head0.y;
                     unshift.m[14] = -head0.z;
-                    arm_world = hal_mat4f_mul(arm_world, unshift);
+                    hal_mat4f arm_world = hal_mat4f_mul(
+                        hal_mat4f_mul(world[root_node], unrot),
+                        unshift);
                     hal_vec3f aloc;
                     hal_quatf arot;
                     hal_vec3f ascale;
@@ -2316,6 +2711,16 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
                     hal_object_set_scale(scene, arm_id, ascale);
                 }
 
+                /* Two phases: joints may list children before their
+                 * parents (legal glTF), and hal_armature_bone_add
+                 * rejects a parent index that does not exist yet —
+                 * so bones are created unparented and linked after. */
+                int *intended_parent =
+                    malloc((bone_count ? bone_count : 1) * sizeof(int));
+                if (!intended_parent)
+                    continue;
+                for (size_t b = 0; b < bone_count; b++)
+                    intended_parent[b] = -1;
                 for (size_t b = 0; b < bone_count; b++) {
                     const hal_json *jn = joints->items[b];
                     if (!jn || jn->type != HAL_JSON_NUMBER ||
@@ -2334,6 +2739,8 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
                             (hal_f32)json_num(lt, 2, 0));
                     int parent_bone =
                         parent_of[ni] >= 0 ? bone_of[parent_of[ni]] : -1;
+                    intended_parent[b] = parent_bone;
+                    parent_bone = -1; /* linked in phase two */
                     hal_quatf pose = hal_quatf_identity();
                     const hal_json *r = json_get(n, "rotation");
                     if (r)
@@ -2342,6 +2749,13 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
                             (hal_f32)json_num(r, 1, 0),
                             (hal_f32)json_num(r, 2, 0),
                             (hal_f32)json_num(r, 3, 1));
+                    /* Foreign rest offset: the accumulated chain of
+                     * the file's joint REST rotations, so the in-app
+                     * bind matrix equals the file's node-chain rest
+                     * (its inverseBindMatrices are then reproduced
+                     * exactly). Halcyon files have identity joint
+                     * rotations -> identity offsets -> the native
+                     * pure-translation binds. */
                     char bname[64];
                     const hal_json *nm = json_get(n, "name");
                     snprintf(bname, sizeof(bname), "%s",
@@ -2354,6 +2768,77 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
                                       hal_vec3f_make(0, 0.1f, 0)),
                         parent_bone);
                     arm->bones[b].pose = pose;
+                    if (foreign_file) {
+                        /* Accumulated joint REST rotations (parents
+                         * precede children in Halcyon exports and
+                         * the common exporters; a child-before-
+                         * parent ordering defers to the fix-up pass
+                         * below — the parent bone does not exist
+                         * yet here). */
+                        hal_quatf parent_off =
+                            hal_quatf_identity();
+                        if (parent_bone >= 0 &&
+                            (size_t)parent_bone < b)
+                            parent_off =
+                                arm->bones[parent_bone].rest_offset;
+                        arm->bones[b].rest_offset = hal_quatf_mul(
+                            parent_off, pose);
+                    }
+                }
+
+                /* Phase two: link the intended parents (all bones
+                 * exist now). */
+                for (size_t b = 0; b < bone_count && b < arm->count;
+                     b++)
+                    if (intended_parent[b] >= 0 &&
+                        (size_t)intended_parent[b] < bone_count)
+                        arm->bones[b].parent = intended_parent[b];
+                free(intended_parent);
+
+                /* Topological fix-up: when a child joint precedes its
+                 * parent in the joints array, the one-shot loop above
+                 * used a stale parent offset — recompute until stable
+                 * (at most bone_count passes; cycles bail out). */
+                if (foreign_file && arm->count > 1) {
+                    for (size_t pass = 0; pass < arm->count;
+                         pass++) {
+                        bool changed = false;
+                        for (size_t b = 0; b < bone_count; b++) {
+                            const hal_json *jn = joints->items[b];
+                            if (!jn || jn->type != HAL_JSON_NUMBER ||
+                                (size_t)jn->number >= node_count)
+                                continue;
+                            size_t ni = (size_t)jn->number;
+                            const hal_json *n2 = nodes->items[ni];
+                            hal_quatf local =
+                                hal_quatf_identity();
+                            const hal_json *r2 =
+                                json_get(n2, "rotation");
+                            if (r2)
+                                local = hal_quatf_make(
+                                    (hal_f32)json_num(r2, 0, 0),
+                                    (hal_f32)json_num(r2, 1, 0),
+                                    (hal_f32)json_num(r2, 2, 0),
+                                    (hal_f32)json_num(r2, 3, 1));
+                            hal_quatf parent_off =
+                                hal_quatf_identity();
+                            if (arm->bones[b].parent >= 0)
+                                parent_off = arm->bones
+                                    [arm->bones[b].parent]
+                                    .rest_offset;
+                            hal_quatf want = hal_quatf_mul(
+                                parent_off, local);
+                            if (want.x != arm->bones[b].rest_offset.x ||
+                                want.y != arm->bones[b].rest_offset.y ||
+                                want.z != arm->bones[b].rest_offset.z ||
+                                want.w != arm->bones[b].rest_offset.w) {
+                                arm->bones[b].rest_offset = want;
+                                changed = true;
+                            }
+                        }
+                        if (!changed)
+                            break;
+                    }
                 }
 
                 /* Attach every mesh node referencing this skin. */
@@ -2367,7 +2852,22 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
                     if (mo && mo->mesh) {
                         mo->skin_armature = arm_id;
                         /* JOINTS_0 values are positions in the joints
-                         * array == bone indices already. */
+                         * array == bone indices already. Foreign
+                         * skinned meshes render in skin space — the
+                         * node transform is IGNORED by glTF, so the
+                         * object carries identity. (Halcyon's own
+                         * exports bake the mesh transform into the
+                         * inverse binds instead, and keep it.) */
+                        if (foreign_file) {
+                            hal_object_set_location(scene,
+                                                    mo->id,
+                                                    hal_vec3f_zero());
+                            hal_object_set_rotation(
+                                scene, mo->id,
+                                hal_quatf_identity());
+                            hal_object_set_scale(
+                                scene, mo->id, hal_vec3f_one());
+                        }
                     }
                 }
                 /* Bone animation channels for this armature (uses
@@ -2468,6 +2968,7 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
     free(data);
     free(ictx.node_obj);
     free(ictx.node_skin);
+    free(ictx.mat_map);
 
     if (!ok) {
         hal_scene_destroy(scene);
