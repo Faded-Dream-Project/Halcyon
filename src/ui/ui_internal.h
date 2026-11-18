@@ -92,6 +92,7 @@ struct hal_widget {
 
     hal_rectf rect;     /* parent-relative, logical                  */
     hal_rectf abs_rect; /* window-logical (valid after layout)       */
+    char *tooltip;      /* owned; drawn after hover lingers          */
     /* Generic per-widget event hook (the curve editor uses it):
      * pressed/dragged/released when the widget (or a child) is hit;
      * returning true consumes the event. */
@@ -201,6 +202,9 @@ void hal__uvview_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);
 
 /* curves.c */
 void hal__curves_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);
+
+/* paint.c: the hover tooltip overlay. */
+void hal__paint_tooltip(hal_ui *ui, hal_canvas *canvas);
 
 /* tree.c */
 void hal__tree_paint(hal_ui *ui, hal_widget *w, hal_canvas *canvas);

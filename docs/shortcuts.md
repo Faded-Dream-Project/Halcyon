@@ -21,6 +21,11 @@ bindings next to their items.
 | Middle-drag (or Alt+Left-drag) | Orbit |
 | Shift+Middle-drag | Pan |
 | Wheel | Zoom |
+| F | Frame the selected object |
+
+Snapping (View menu sets the mode, Ctrl-hold applies during gizmo
+drags): grid 0.25, increment 0.1, or snap to the nearest vertex of
+another object.
 
 ## Object mode
 
@@ -39,7 +44,10 @@ bindings next to their items.
 | Tab | Back to object mode |
 | 1 / 2 / 3 | Vertex / edge / face selection |
 | Left-click | Select (Shift extends) |
-| E | Extrude selected faces |
+| G | Grab selected verts (drag on the camera plane) |
+| O | Toggle proportional editing (falloff during grabs) |
+| K | Knife: drag across the mesh, release to cut |
+| E | Extrude selected faces (region-aware) |
 | I | Inset selected faces |
 | B | Bevel selected edges |
 | Ctrl+R | Loop cut (hover an edge, or select one first) |

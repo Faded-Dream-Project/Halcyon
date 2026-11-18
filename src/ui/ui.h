@@ -156,6 +156,9 @@ hal_rectf hal_tree_row_rect(hal_widget *tree, const hal_tree_row *row);
 hal_widget *hal_uvview_create(hal_widget *parent);
 void hal_uvview_bind(hal_widget *uvview, const hal_mesh *mesh);
 
+/* A hover tooltip (shown after the pointer rests on the widget). */
+void hal_widget_set_tooltip(hal_widget *w, const char *text);
+
 /* Installs a generic per-widget event hook (pressed/dragged/
  * released; true consumes). Used by the curve editor. */
 void hal_widget_set_event_hook(

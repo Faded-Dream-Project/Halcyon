@@ -8,6 +8,8 @@
 
 #include "ui_internal.h"
 
+#include <time.h>
+
 #include <string.h>
 
 static void paint_label(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
@@ -390,4 +392,45 @@ void hal__paint_menu_overlay(hal_ui *ui, hal_canvas *canvas) {
                                  t->colors[HAL_THEME_TEXT_DIM]);
         }
     }
+}
+
+/* Tooltips appear once the pointer has rested on the same widget
+ * for half a second (the calm-app pace: nothing flashes). */
+void hal__paint_tooltip(hal_ui *ui, hal_canvas *canvas) {
+    if (!ui || !canvas || !ui->hover || !ui->hover->tooltip)
+        return;
+    static hal_widget *last_hover = NULL;
+    static double hover_since = 0.0;
+    static hal_f32 last_x = -1, last_y = -1;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    double now = (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+
+    if (ui->hover != last_hover || ui->last_pointer.x != last_x ||
+        ui->last_pointer.y != last_y) {
+        last_hover = ui->hover;
+        hover_since = now;
+        last_x = ui->last_pointer.x;
+        last_y = ui->last_pointer.y;
+        return;
+    }
+    if (now - hover_since < 0.5)
+        return;
+
+    const hal_theme *t = ui->theme;
+    hal_font *font = hal_ui_font(ui, t->font_size_small);
+    if (!font)
+        return;
+    const char *text = ui->hover->tooltip;
+    hal_text_metrics tm;
+    hal_f32 tw = 8.0f * (hal_f32)strlen(text);
+    if (hal_ok(hal_font_measure(font, text, strlen(text), &tm)))
+        tw = (hal_f32)tm.advance_width;
+    hal_f32 x = ui->last_pointer.x + 12.0f;
+    hal_f32 y = ui->last_pointer.y + 18.0f;
+    hal_rectf box = { x - 4.0f, y - 12.0f, tw + 10.0f, 20.0f };
+    hal_canvas_fill_rect(canvas, box, t->colors[HAL_THEME_PANEL]);
+    hal_canvas_draw_rect(canvas, box, t->colors[HAL_THEME_BORDER]);
+    hal_canvas_draw_text(canvas, font, text, strlen(text), x, y,
+                         t->colors[HAL_THEME_TEXT]);
 }

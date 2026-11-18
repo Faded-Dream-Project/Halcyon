@@ -633,6 +633,34 @@ case; noted below).
 - Tests: test_modeling (17 checks) — region face/vert counts, seam
   chart counts + UV ranges, knife splits/misses/on-surface semantics.
 
+### Implemented and tested — stability + usability (session 4)
+
+- FUZZ (test_fuzz, deterministic splitmix64 seed): 240 random-byte
+  files, every truncation (1/64 steps) of valid .halcyon/.obj/.glb
+  files, 300 mutated valid files, and 120 GLB structural-garbage
+  cases (valid magic, absurd lengths, junk chunk types) — every one
+  through hal_project_load, hal_io_obj_import and hal_io_gltf_import
+  under ASan+UBSan. The suite asserts both directions: clean
+  rejections happened AND the valid files still load. FOUND A REAL
+  BUG: nine hal_project_load error paths leaked the parsed key (key
+  now hoisted, NULLed at every free, freed at done).
+- Hostile inputs: absurd declared counts ("mesh 4000000000") are
+  rejected without allocating; huge OBJ face indices reject; a
+  1000-deep parenting chain loads and its world matrices resolve
+  (recursion depth is tree depth, cycle-free by rule).
+- Large-scene stress: 200 twice-subdivided cubes (~24k verts) —
+  save/load round trip, one rasterizer pass, and a quickhull — all
+  under the sanitizers.
+- Hint bar: a second status line showing the current mode's key map
+  (object/edit+prop/pose/paint), refreshed on every status change.
+- First-run quick start: a seven-line card over the viewport on
+  EMPTY first scenes (add, edit, material, animate, export); any
+  viewport click dismisses it for the session.
+- Tooltips: hal_widget_set_tooltip + a hover overlay after the
+  pointer rests 500ms (the Wire/Paint tool-rail toggles carry the
+  first two). docs/shortcuts.md gained G/O/K/F and the snapping
+  modes.
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -686,6 +714,11 @@ case; noted below).
 
 ## Log
 
+- **2026-11-18 — session 4, items 5-6: stability + usability.** A
+  deterministic fuzz suite over all three loaders (found and fixed
+  nine leaked parser keys), hostile-count and deep-chain and
+  large-scene stress; the hint bar, quick-start overlay and
+  tooltips. The v0.2 plan is complete. 2383 headless checks total.
 - **2026-11-18 — session 4, item 4: modeling quality.** Region
   extrude, angle-based unwrap, the knife, proportional grab, and
   snapping (edge slide deferred). Two knife bugs and one packer

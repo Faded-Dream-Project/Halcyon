@@ -100,6 +100,10 @@ struct hal_app {
     bool export_z_up;
     bool export_cm;
 
+    /* The context hint line + the first-run quick start. */
+    hal_widget *hint;
+    bool quickstart_shown;
+
     /* Edit-mode vertex grab (with proportional falloff). */
     bool grabbing;
     hal_object_id grab_obj;
@@ -1133,6 +1137,27 @@ static void build_menus(hal_app *app) {
 
 /* ---- Project actions ---- */
 
+/* The context hint bar: the current mode's key map, one line. */
+static void refresh_hint(hal_app *app) {
+    const char *h =
+        app->paint_mode
+            ? "PAINT  drag: add weight  Shift+drag: subtract  "
+              "pick bones in pose mode"
+        : app->edit_mode
+            ? (app->prop_edit
+                   ? "EDIT+PROP  G: grab  K: knife  E: extrude  "
+                     "I: inset  B: bevel  1/2/3: select  O: prop"
+                     " off  Tab: done"
+                   : "EDIT  G: grab  K: knife  E: extrude  I: "
+                     "inset  B: bevel  1/2/3: select  O: prop  "
+                     "Tab: done")
+        : app->pose_mode
+            ? "POSE  LMB: bone  R: rotate  I: key  Tab: done"
+            : "OBJECT  LMB: select  gizmo: move  R: rotate  "
+              "S: scale  Ctrl+drag: snap  Tab: edit";
+    hal_widget_set_text(app->hint, h);
+}
+
 static void set_status(hal_app *app, const char *fmt, ...) {
     char text[256];
     va_list ap;
@@ -1140,6 +1165,7 @@ static void set_status(hal_app *app, const char *fmt, ...) {
     vsnprintf(text, sizeof(text), fmt, ap);
     va_end(ap);
     hal_widget_set_text(app->status, text);
+    refresh_hint(app);
 }
 
 static void scene_new(hal_app *app) {
@@ -2066,8 +2092,10 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
     hal_curves_interactive(app->curves, NULL, curves_edit_notify,
                            app);
 
-    /* Status bar. */
+    /* Status bar + the context hint line. */
     app->status = hal_label_create(hal_ui_root(app->ui), "Welcome");
+    app->hint =
+        hal_label_create(hal_ui_root(app->ui), "");
 
     /* A starting cube: something to look at from the first frame. */
     add_object(app, "Cube", HAL_OBJECT_MESH, hal_vec3f_zero());
@@ -2857,6 +2885,7 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
                 }
                 return true;
             }
+            app->quickstart_shown = false;
             if (app->paint_mode) {
                 paint_begin(app, vpm, vp, px, py,
                             (mods & HAL_MOD_SHIFT) != 0);
@@ -3357,6 +3386,47 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
                     if (w0 > 0.0f && w1 > 0.0f)
                         hal_canvas_draw_line(&canvas, a.x, a.y, b.x, b.y,
                                              t->colors[HAL_THEME_ACCENT]);
+                }
+                /* The first-run quick start (until the first
+                 * click in the viewport). */
+                if (app->quickstart_shown) {
+                    const hal_rectf vpq = vp2;
+                    const char *lines[] = {
+                        "Welcome to Halcyon",
+                        "1. Add a mesh (Add menu) or click the cube",
+                        "2. Tab edits it - E extrudes, K cuts",
+                        "3. New Material + Load Texture dress it",
+                        "4. Animation > New Clip, I keys, Space",
+                        "5. File > Export glTF - done",
+                        "Click anywhere to begin",
+                    };
+                    hal_f32 ox2 = vpq.x + 24.0f;
+                    hal_f32 oy2 = vpq.y + 28.0f;
+                    hal_canvas_fill_rect(
+                        &canvas,
+                        (hal_rectf){ ox2 - 10.0f, oy2 - 18.0f,
+                                     430.0f, 190.0f },
+                        t->colors[HAL_THEME_PANEL]);
+                    hal_canvas_draw_rect(
+                        &canvas,
+                        (hal_rectf){ ox2 - 10.0f, oy2 - 18.0f,
+                                     430.0f, 190.0f },
+                        t->colors[HAL_THEME_BORDER]);
+                    for (size_t li2 = 0;
+                         li2 < sizeof(lines) / sizeof(lines[0]);
+                         li2++) {
+                        hal_canvas_draw_text(
+                            &canvas,
+                            hal_ui_font(app->ui,
+                                        li2 == 0
+                                            ? t->font_size
+                                            : t->font_size_small),
+                            lines[li2], strlen(lines[li2]), ox2,
+                            oy2 + (hal_f32)li2 * 24.0f,
+                            li2 == 0
+                                ? t->colors[HAL_THEME_ACCENT]
+                                : t->colors[HAL_THEME_TEXT]);
+                    }
                 }
                 /* The knife drag line. */
                 if (app->knifing) {

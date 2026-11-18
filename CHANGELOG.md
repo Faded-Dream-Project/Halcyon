@@ -6,6 +6,18 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — stability + usability (2026-11-18, session 4)
+
+- A deterministic fuzz suite: random bytes, truncations, mutations
+  and GLB structural garbage through every loader under ASan/UBSan —
+  crashes are never acceptable. It found and fixed nine leaked
+  parser keys in project-load error paths.
+- Hostile-count rejection, 1000-deep hierarchy and large-scene
+  stress tests.
+- A context hint bar (the current mode's key map), a first-run
+  quick-start card, hover tooltips on the tool rail, and Frame
+  Selected (F).
+
 ### Added — modeling quality (2026-11-18, session 4)
 
 - Region-aware extrude (E): connected faces move as one seamless

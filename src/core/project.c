@@ -426,6 +426,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
     }
 
     parser p = { .data = data, .len = len, .pos = 0, .line = 1 };
+    char *key = NULL; /* freed at done; error paths NULL it */
     hal_result result = HAL_OK;
     hal_scene *scene = NULL;
     hal_object_id current = HAL_OBJECT_ID_NONE;
@@ -434,15 +435,17 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
 
     /* --- header --- */
     {
-        char *key = parse_word(&p);
-        if (!key || strcmp(key, "halcyon") != 0) {
+        char *hkey = parse_word(&p);
+        if (!hkey || strcmp(hkey, "halcyon") != 0) {
             set_err(err, err_cap, "line 1: not a halcyon project "
                                   "(expected 'halcyon <version>')");
             result = HAL_ERR_INVALID_ARGUMENT;
-            free(key);
+            free(hkey);
+            key = NULL;
             goto done;
         }
-        free(key);
+        free(hkey);
+            key = NULL;
 
         hal_u32 version = 0;
         if (!parse_u32(&p, &version) || !expect_end_of_line(&p)) {
@@ -472,7 +475,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
         }
 
         int line_no = p.line;
-        char *key = parse_word(&p);
+        key = parse_word(&p);
         if (!key) {
             set_err(err, err_cap, "line %d: expected a key", line_no);
             result = HAL_ERR_INVALID_ARGUMENT;
@@ -485,6 +488,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         "line %d: duplicate 'scene'", line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             char *name = parse_quoted(&p);
@@ -494,6 +498,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(name);
                 free(key);
+            key = NULL;
                 goto done;
             }
             scene = hal_scene_create(name);
@@ -502,6 +507,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 set_err(err, err_cap, "out of memory");
                 result = HAL_ERR_OUT_OF_MEMORY;
                 free(key);
+            key = NULL;
                 goto done;
             }
             consume_line(&p);
@@ -512,6 +518,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                     set_err(err, err_cap, "out of memory");
                     result = HAL_ERR_OUT_OF_MEMORY;
                     free(key);
+            key = NULL;
                     goto done;
                 }
             }
@@ -535,6 +542,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 free(name);
                 free(type_tok);
                 free(key);
+            key = NULL;
                 goto done;
             }
             consume_line(&p);
@@ -551,6 +559,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 set_err(err, err_cap, "out of memory");
                 result = HAL_ERR_OUT_OF_MEMORY;
                 free(key);
+            key = NULL;
                 goto done;
             }
             /* The file states its own ids; adopt them. Objects are
@@ -571,6 +580,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         key);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
 
@@ -581,6 +591,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             "line %d: parent wants one id", line_no);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
                 /* Parents must be defined BEFORE their children, so a
@@ -593,6 +604,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             line_no, (unsigned)parent, (unsigned)obj->id);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
                 obj->parent = parent;
@@ -604,6 +616,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             "line %d: loc wants three numbers", line_no);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
                 obj->location = hal_vec3f_make(x, y, z);
@@ -616,6 +629,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             "line %d: rot wants four numbers", line_no);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
                 obj->rotation = hal_quatf_normalize(hal_quatf_make(x, y, z, w));
@@ -627,6 +641,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             "line %d: scale wants three numbers", line_no);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
                 obj->scale = hal_vec3f_make(x, y, z);
@@ -655,6 +670,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         result = HAL_ERR_INVALID_ARGUMENT;
                         free(flag);
                         free(key);
+            key = NULL;
                         goto done;
                     }
                     free(flag);
@@ -668,6 +684,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         "line %d: 'mat' outside an object block", line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             hal_u32 mat = 0;
@@ -676,6 +693,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         "line %d: mat wants one index", line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             obj->material = (int)mat;
@@ -688,6 +706,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             hal_u32 skin = 0;
@@ -696,6 +715,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         "line %d: skin wants one id", line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             obj->skin_armature = skin;
@@ -707,6 +727,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             hal_u32 bi = 0;
@@ -721,6 +742,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             obj->armature->bones[bi].rest_offset =
@@ -733,6 +755,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             hal_u32 idx = 0;
@@ -767,6 +790,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 free(name);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             consume_line(&p);
@@ -780,6 +804,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         (unsigned)idx);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             obj->armature->bones[added].pose =
@@ -793,6 +818,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             hal_u32 nv = 0;
@@ -802,6 +828,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         "line %d: weights wants the vert count", line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             consume_line(&p);
@@ -813,6 +840,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 set_err(err, err_cap, "out of memory");
                 result = HAL_ERR_OUT_OF_MEMORY;
                 free(key);
+            key = NULL;
                 goto done;
             }
             bool w_ok = true;
@@ -855,6 +883,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         "line %d: bad weights block", line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             free(obj->mesh->skin_weights);
@@ -871,6 +900,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         key);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             if (strcmp(key, "mesh") == 0) {
@@ -883,6 +913,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             "line %d: mesh wants three counts", line_no);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
                 if (nv > 10000000u || ne > 40000000u || nf > 10000000u) {
@@ -890,6 +921,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             "line %d: mesh counts out of range", line_no);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
                 obj->mesh = hal_mesh_create();
@@ -897,6 +929,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                     set_err(err, err_cap, "out of memory");
                     result = HAL_ERR_OUT_OF_MEMORY;
                     free(key);
+            key = NULL;
                     goto done;
                 }
             } else if (!obj->mesh) {
@@ -905,6 +938,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         key);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             } else if (strcmp(key, "v") == 0) {
                 hal_f32 x, y, z;
@@ -916,6 +950,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             "line %d: v wants three numbers", line_no);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
             } else if (strcmp(key, "e") == 0) {
@@ -927,6 +962,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             "line %d: e wants two vertex ids", line_no);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
             } else { /* f <n> <corners...> */
@@ -937,6 +973,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             line_no);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
                 hal_u32 corners[64];
@@ -947,6 +984,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                                 (unsigned)n);
                         result = HAL_ERR_INVALID_ARGUMENT;
                         free(key);
+            key = NULL;
                         goto done;
                     }
                 if (!expect_end_of_line(&p) ||
@@ -956,6 +994,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                             line_no);
                     result = HAL_ERR_INVALID_ARGUMENT;
                     free(key);
+            key = NULL;
                     goto done;
                 }
             }
@@ -972,6 +1011,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 free(name);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             consume_line(&p);
@@ -1092,6 +1132,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 free(img_path);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             consume_line(&p);
@@ -1100,6 +1141,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 set_err(err, err_cap, "out of memory");
                 result = HAL_ERR_OUT_OF_MEMORY;
                 free(key);
+            key = NULL;
                 goto done;
             }
             free(img_path);
@@ -1116,6 +1158,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 free(name);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             consume_line(&p);
@@ -1132,6 +1175,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             cur_clip->start = s;
@@ -1144,6 +1188,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         "line %d: loop wants 0 or 1", line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             cur_clip->loop = v != 0;
@@ -1169,6 +1214,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             cur_channel = hal_clip_channel(cur_clip,
@@ -1178,6 +1224,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                 set_err(err, err_cap, "out of memory");
                 result = HAL_ERR_OUT_OF_MEMORY;
                 free(key);
+            key = NULL;
                 goto done;
             }
         } else if (strcmp(key, "key") == 0) {
@@ -1197,6 +1244,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             }
             hal_keyframe kf = {
@@ -1218,6 +1266,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                     set_err(err, err_cap, "out of memory");
                     result = HAL_ERR_OUT_OF_MEMORY;
                     free(key);
+            key = NULL;
                     goto done;
                 }
                 cur_channel->keys = grown;
@@ -1236,6 +1285,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         "line %d: 'end' outside an object block", line_no);
                 result = HAL_ERR_INVALID_ARGUMENT;
                 free(key);
+            key = NULL;
                 goto done;
             } else {
                 current = HAL_OBJECT_ID_NONE;
@@ -1245,10 +1295,12 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
             set_err(err, err_cap, "line %d: unknown key '%s'", line_no, key);
             result = HAL_ERR_INVALID_ARGUMENT;
             free(key);
+            key = NULL;
             goto done;
         }
 
         free(key);
+            key = NULL;
     }
 
     if (result == HAL_OK && current != HAL_OBJECT_ID_NONE) {
@@ -1268,6 +1320,7 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
     }
 
 done:
+    free(key);
     free(data);
     if (result == HAL_OK) {
         *out_scene = scene;

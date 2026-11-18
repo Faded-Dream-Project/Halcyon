@@ -67,6 +67,7 @@ void hal__widget_destroy_tree(hal_widget *w) {
         menubar_data_free(w);
     if (w->kind == HAL_WIDGET_TREE)
         hal__tree_clear_rows(w);
+    free(w->tooltip);
     if (w->ui) {
         if (w->ui->focus == w)
             w->ui->focus = NULL;
@@ -267,4 +268,15 @@ void hal_widget_set_event_hook(
         return;
     w->on_event = on_event;
     w->on_event_user = user;
+}
+
+void hal_widget_set_tooltip(hal_widget *w, const char *text) {
+    if (!w)
+        return;
+    w->tooltip = NULL;
+    if (text && text[0]) {
+        w->tooltip = malloc(strlen(text) + 1);
+        if (w->tooltip)
+            strcpy(w->tooltip, text);
+    }
 }

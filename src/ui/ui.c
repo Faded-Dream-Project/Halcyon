@@ -81,7 +81,7 @@ void hal_ui_paint(hal_ui *ui, hal_canvas *canvas) {
     if (ui->open_menubar)
         hal__paint_menu_overlay(ui, canvas);
 
-    ui->needs_paint = false;
+    ui->needs_paint = false;    hal__paint_tooltip(ui, canvas);
 }
 
 bool hal_ui_handle_event(hal_ui *ui, const hal_event *event) {
