@@ -148,10 +148,12 @@ static void render_grid(hal_raster *raster, hal_mat4f view_proj,
 
 static void render_mesh_solid(hal_raster *raster, hal_mesh *mesh,
                               hal_mat4f world, hal_mat4f view_proj,
-                              hal_vec3f eye, hal_f32 ox, hal_f32 oy,
-                              hal_f32 vw, hal_f32 vh, hal_color base) {
+                              hal_vec3f eye, bool smooth, hal_f32 ox,
+                              hal_f32 oy, hal_f32 vw, hal_f32 vh,
+                              hal_color base) {
     const hal_vec3f *fn = hal_mesh_face_normals(mesh);
-    if (!fn)
+    const hal_vec3f *vn = smooth ? hal_mesh_vert_normals(mesh) : NULL;
+    if (!fn || (smooth && !vn))
         return;
 
     for (size_t f = 0; f < mesh->face_count; f++) {
@@ -183,6 +185,10 @@ static void render_mesh_solid(hal_raster *raster, hal_mesh *mesh,
         hal_f32 shade = 0.18f + 0.82f * d;
         hal_color shaded = hal_color_rgb(base.r * shade, base.g * shade,
                                          base.b * shade);
+        /* Smooth shading: per-corner lambert from the vertex normals
+         * (against each corner's own light direction); flat: the
+         * face's value everywhere. */
+        hal_f32 flat_i = shade;
 
         /* Fan-triangulate (Halcyon's faces are convex). */
         for (size_t i = 1; i + 1 < count; i++) {
@@ -196,7 +202,18 @@ static void render_mesh_solid(hal_raster *raster, hal_mesh *mesh,
                 poly[k].pos = hal_mat4f_mul_vec4(
                     view_proj, hal_vec4f_make(wp.x, wp.y, wp.z, 1.0f));
                 poly[k].normal = fn[f];
-                poly[k].intensity = 1.0f;
+                poly[k].intensity = flat_i;
+                if (vn) {
+                    hal_vec3f n =
+                        hal_vec3f_normalize(hal_mat4f_transform_dir(
+                            world, vn[idx[k]]));
+                    hal_vec3f ldir = hal_vec3f_normalize(
+                        hal_vec3f_sub(eye, wp));
+                    hal_f32 dd = hal_vec3f_dot(n, ldir);
+                    if (dd < 0.0f)
+                        dd = 0.0f;
+                    poly[k].intensity = 0.18f + 0.82f * dd;
+                }
             }
 
             size_t n = 3;
@@ -217,11 +234,11 @@ static void render_mesh_solid(hal_raster *raster, hal_mesh *mesh,
                 hal_raster_triangle(
                     raster,
                     hal_vec3f_make(s0.x * vw + ox, s0.y * vh + oy, s0.z),
-                    1.0f,
+                    poly[0].intensity,
                     hal_vec3f_make(s1.x * vw + ox, s1.y * vh + oy, s1.z),
-                    1.0f,
+                    poly[t].intensity,
                     hal_vec3f_make(s2.x * vw + ox, s2.y * vh + oy, s2.z),
-                    1.0f, shaded);
+                    poly[t + 1].intensity, shaded);
             }
         }
     }
@@ -345,8 +362,8 @@ void hal_render_view(hal_raster *raster, hal_scene *scene,
                              vw, vh, opts->object);
         } else {
             render_mesh_solid(raster, obj->mesh, world, view_proj,
-                              hal_camera_eye(cam), ox, oy, vw, vh,
-                              opts->object);
+                              hal_camera_eye(cam), obj->smooth_shading,
+                              ox, oy, vw, vh, opts->object);
         }
     }
 

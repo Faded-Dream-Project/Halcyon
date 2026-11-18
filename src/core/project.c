@@ -77,10 +77,37 @@ hal_result hal_project_save(const hal_scene *scene, const char *path,
                            (double)o->rotation.z, (double)o->rotation.w) > 0;
         ok = ok && fprintf(f, "  scale %.9g %.9g %.9g\n", (double)o->scale.x,
                            (double)o->scale.y, (double)o->scale.z) > 0;
-        ok = ok && fprintf(f, "  flags%s%s%s\n",
+        ok = ok && fprintf(f, "  flags%s%s%s%s\n",
                            o->visible ? " visible" : "",
                            o->selected ? " selected" : "",
-                           (!o->visible && !o->selected) ? " -" : "") > 0;
+                           o->smooth_shading ? " smooth" : "",
+                           (!o->visible && !o->selected &&
+                            !o->smooth_shading)
+                               ? " -"
+                               : "") > 0;
+        if (o->mesh) {
+            const hal_mesh *mm = o->mesh;
+            ok = ok && fprintf(f, "  mesh %zu %zu %zu\n", mm->vert_count,
+                               mm->edge_count, mm->face_count) > 0;
+            for (size_t v = 0; v < mm->vert_count; v++)
+                ok = ok && fprintf(f, "  v %.9g %.9g %.9g\n",
+                                   (double)mm->verts[v].x,
+                                   (double)mm->verts[v].y,
+                                   (double)mm->verts[v].z) > 0;
+            for (size_t e = 0; e < mm->edge_count; e++)
+                ok = ok && fprintf(f, "  e %u %u\n",
+                                   (unsigned)mm->edges[e * 2],
+                                   (unsigned)mm->edges[e * 2 + 1]) > 0;
+            for (size_t f2 = 0; f2 < mm->face_count; f2++) {
+                ok = ok && fprintf(f, "  f %zu",
+                                   mm->face_off[f2 + 1] -
+                                       mm->face_off[f2]) > 0;
+                for (size_t li = mm->face_off[f2];
+                     ok && li < mm->face_off[f2 + 1]; li++)
+                    ok = fprintf(f, " %u", (unsigned)mm->loops[li]) > 0;
+                ok = ok && fprintf(f, "\n") > 0;
+            }
+        }
         ok = ok && fprintf(f, "end\n") > 0;
     }
 
@@ -500,6 +527,8 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         obj->visible = true;
                     else if (strcmp(flag, "selected") == 0)
                         obj->selected = true;
+                    else if (strcmp(flag, "smooth") == 0)
+                        obj->smooth_shading = true;
                     else if (strcmp(flag, "-") == 0) {
                         /* explicit "none" marker written by the saver */
                     } else {
@@ -511,6 +540,105 @@ hal_result hal_project_load(const char *path, hal_scene **out_scene,
                         goto done;
                     }
                     free(flag);
+                }
+            }
+            consume_line(&p);
+        } else if (strcmp(key, "mesh") == 0 ||
+                   strcmp(key, "v") == 0 || strcmp(key, "e") == 0 ||
+                   strcmp(key, "f") == 0) {
+            hal_object *obj = hal_scene_object(scene, current);
+            if (!obj) {
+                set_err(err, err_cap,
+                        "line %d: '%s' outside an object block", line_no,
+                        key);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            }
+            if (strcmp(key, "mesh") == 0) {
+                /* mesh <verts> <edges> <faces>: counts, verified at
+                 * block end. */
+                hal_u32 nv = 0, ne = 0, nf = 0;
+                if (!parse_u32(&p, &nv) || !parse_u32(&p, &ne) ||
+                    !parse_u32(&p, &nf) || !expect_end_of_line(&p)) {
+                    set_err(err, err_cap,
+                            "line %d: mesh wants three counts", line_no);
+                    result = HAL_ERR_INVALID_ARGUMENT;
+                    free(key);
+                    goto done;
+                }
+                if (nv > 10000000u || ne > 40000000u || nf > 10000000u) {
+                    set_err(err, err_cap,
+                            "line %d: mesh counts out of range", line_no);
+                    result = HAL_ERR_INVALID_ARGUMENT;
+                    free(key);
+                    goto done;
+                }
+                obj->mesh = hal_mesh_create();
+                if (!obj->mesh) {
+                    set_err(err, err_cap, "out of memory");
+                    result = HAL_ERR_OUT_OF_MEMORY;
+                    free(key);
+                    goto done;
+                }
+            } else if (!obj->mesh) {
+                set_err(err, err_cap,
+                        "line %d: '%s' before its 'mesh' header", line_no,
+                        key);
+                result = HAL_ERR_INVALID_ARGUMENT;
+                free(key);
+                goto done;
+            } else if (strcmp(key, "v") == 0) {
+                hal_f32 x, y, z;
+                if (!parse_float(&p, &x) || !parse_float(&p, &y) ||
+                    !parse_float(&p, &z) || !expect_end_of_line(&p) ||
+                    hal_mesh_vert_add(obj->mesh,
+                                      hal_vec3f_make(x, y, z)) < 0) {
+                    set_err(err, err_cap,
+                            "line %d: v wants three numbers", line_no);
+                    result = HAL_ERR_INVALID_ARGUMENT;
+                    free(key);
+                    goto done;
+                }
+            } else if (strcmp(key, "e") == 0) {
+                hal_u32 a, b;
+                if (!parse_u32(&p, &a) || !parse_u32(&p, &b) ||
+                    !expect_end_of_line(&p) ||
+                    hal_mesh_edge_add(obj->mesh, a, b) < 0) {
+                    set_err(err, err_cap,
+                            "line %d: e wants two vertex ids", line_no);
+                    result = HAL_ERR_INVALID_ARGUMENT;
+                    free(key);
+                    goto done;
+                }
+            } else { /* f <n> <corners...> */
+                hal_u32 n = 0;
+                if (!parse_u32(&p, &n) || n < 3 || n > 64) {
+                    set_err(err, err_cap,
+                            "line %d: f wants a corner count in [3,64]",
+                            line_no);
+                    result = HAL_ERR_INVALID_ARGUMENT;
+                    free(key);
+                    goto done;
+                }
+                hal_u32 corners[64];
+                for (hal_u32 i = 0; i < n; i++)
+                    if (!parse_u32(&p, &corners[i])) {
+                        set_err(err, err_cap,
+                                "line %d: f wants %u corners", line_no,
+                                (unsigned)n);
+                        result = HAL_ERR_INVALID_ARGUMENT;
+                        free(key);
+                        goto done;
+                    }
+                if (!expect_end_of_line(&p) ||
+                    hal_mesh_face_add(obj->mesh, corners, n) < 0) {
+                    set_err(err, err_cap,
+                            "line %d: bad face (indices out of range?)",
+                            line_no);
+                    result = HAL_ERR_INVALID_ARGUMENT;
+                    free(key);
+                    goto done;
                 }
             }
             consume_line(&p);

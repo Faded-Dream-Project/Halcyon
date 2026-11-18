@@ -52,6 +52,7 @@ typedef struct hal_object {
 
     bool visible;
     bool selected;
+    bool smooth_shading;   /* per-vertex normals when set           */
 
     /* World matrix cache — read through hal_object_world_matrix. */
     hal_mat4f world;
@@ -136,6 +137,8 @@ void hal_scene_select_only(hal_scene *scene, hal_object_id id);
 hal_object_id hal_scene_selected(const hal_scene *scene);
 
 void hal_object_set_visible(hal_scene *scene, hal_object_id id, bool visible);
+void hal_object_set_smooth_shading(hal_scene *scene, hal_object_id id,
+                                   bool smooth);
 
 #ifdef __cplusplus
 }

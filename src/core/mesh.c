@@ -24,10 +24,13 @@ void hal_mesh_destroy(hal_mesh *mesh) {
     free(mesh->face_off);
     free(mesh->face_normals);
     free(mesh->vert_normals);
+    free(mesh->vert_sel);
+    free(mesh->edge_sel);
+    free(mesh->face_sel);
     free(mesh);
 }
 
-static void invalidate_derived(hal_mesh *m) {
+void hal_mesh_invalidate_derived(hal_mesh *m) {
     free(m->face_normals);
     m->face_normals = NULL;
     free(m->vert_normals);
@@ -53,12 +56,29 @@ static bool grow_bytes(void **buf, size_t *cap, size_t need_elems,
     return true;
 }
 
+/* Grows a byte array (selection flags) to `need` entries. */
+static bool grow_flags(hal_u8 **buf, size_t *cap, size_t need) {
+    if (need <= *cap)
+        return true;
+    size_t new_cap = *cap ? *cap : 16;
+    while (new_cap < need)
+        new_cap *= 2;
+    hal_u8 *grown = realloc(*buf, new_cap);
+    if (!grown)
+        return false;
+    memset(grown + *cap, 0, new_cap - *cap);
+    *buf = grown;
+    *cap = new_cap;
+    return true;
+}
+
 int hal_mesh_vert_add(hal_mesh *m, hal_vec3f p) {
     if (!m || !grow_bytes((void **)&m->verts, &m->vert_cap,
-                          m->vert_count + 1, sizeof(hal_vec3f)))
+                          m->vert_count + 1, sizeof(hal_vec3f)) ||
+        !grow_flags(&m->vert_sel, &m->vert_sel_cap, m->vert_count + 1))
         return -1;
     m->verts[m->vert_count] = p;
-    invalidate_derived(m);
+    hal_mesh_invalidate_derived(m);
     return (int)m->vert_count++;
 }
 
@@ -67,7 +87,8 @@ int hal_mesh_edge_add(hal_mesh *m, hal_u32 a, hal_u32 b) {
         b >= (hal_u32)m->vert_count)
         return -1;
     if (!grow_bytes((void **)&m->edges, &m->edge_cap, m->edge_count + 1,
-                    sizeof(hal_u32) * 2))
+                    sizeof(hal_u32) * 2) ||
+        !grow_flags(&m->edge_sel, &m->edge_sel_cap, m->edge_count + 1))
         return -1;
     m->edges[m->edge_count * 2] = a;
     m->edges[m->edge_count * 2 + 1] = b;
@@ -98,9 +119,11 @@ int hal_mesh_face_add(hal_mesh *m, const hal_u32 *corners, size_t count) {
     m->loop_count += count;
     if (m->face_count == 0)
         m->face_off[0] = 0; /* the leading offset */
+    if (!grow_flags(&m->face_sel, &m->face_sel_cap, m->face_count + 1))
+        return -1;
     m->face_count++;
     m->face_off[m->face_count] = m->loop_count;
-    invalidate_derived(m);
+    hal_mesh_invalidate_derived(m);
     return (int)m->face_count - 1;
 }
 
@@ -231,12 +254,14 @@ hal_mesh *hal_mesh_cube(hal_f32 size) {
     hal_mesh_vert_add(m, hal_vec3f_make(s, s, s));
     hal_mesh_vert_add(m, hal_vec3f_make(-s, s, s));
 
-    quad(m, 3, 2, 1, 0); /* bottom (-Y) */
-    quad(m, 4, 5, 6, 7); /* top (+Y)    */
-    quad(m, 0, 1, 5, 4); /* -Z          */
-    quad(m, 1, 2, 6, 5); /* +X          */
-    quad(m, 2, 3, 7, 6); /* +Z          */
-    quad(m, 3, 0, 4, 7); /* -X          */
+    /* Outward (right-hand) windings: bottom -Y, top +Y, then the
+     * four sides. Verified by test_mesh's outward-normal checks. */
+    quad(m, 0, 1, 2, 3); /* bottom (-Y) */
+    quad(m, 7, 6, 5, 4); /* top (+Y)    */
+    quad(m, 4, 5, 1, 0); /* -Z          */
+    quad(m, 5, 6, 2, 1); /* +X          */
+    quad(m, 6, 7, 3, 2); /* +Z          */
+    quad(m, 7, 4, 0, 3); /* -X          */
     return m;
 }
 

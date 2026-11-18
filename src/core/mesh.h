@@ -45,6 +45,16 @@ typedef struct hal_mesh {
     size_t face_count;
     size_t face_cap;
 
+    /* Edit-mode selection, one byte per element, grown with the
+     * arrays (see mesh_ops.h). The capacities are private growth
+     * state; readers use the counts above. */
+    hal_u8 *vert_sel;
+    size_t vert_sel_cap;
+    hal_u8 *edge_sel;
+    size_t edge_sel_cap;
+    hal_u8 *face_sel;
+    size_t face_sel_cap;
+
     /* Derived (owned caches; NULL until requested). */
     hal_vec3f *face_normals;  /* one per face                   */
     hal_vec3f *vert_normals;  /* one per vertex (smooth)        */
@@ -65,6 +75,10 @@ int hal_mesh_face_add(hal_mesh *m, const hal_u32 *corners, size_t count);
 /* Normals (recomputed lazily). */
 const hal_vec3f *hal_mesh_face_normals(hal_mesh *m);
 const hal_vec3f *hal_mesh_vert_normals(hal_mesh *m);
+
+/* Drops the normal/bounds caches (the mutators call this; public for
+ * mesh_ops). */
+void hal_mesh_invalidate_derived(hal_mesh *m);
 
 /* The bounding box (computed lazily; an empty mesh reports zeros). */
 void hal_mesh_bounds(hal_mesh *m, hal_vec3f *out_min, hal_vec3f *out_max);

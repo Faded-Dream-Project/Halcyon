@@ -93,6 +93,7 @@ hal_object_id hal_scene_object_add(hal_scene *scene, const char *name,
     slot->parent = HAL_OBJECT_ID_NONE;
     slot->visible = true;
     slot->selected = false;
+    slot->smooth_shading = false;
     slot->world = hal_mat4f_identity();
     slot->world_dirty = true;
 
@@ -298,4 +299,11 @@ void hal_object_set_visible(hal_scene *scene, hal_object_id id, bool visible) {
     hal_object *obj = hal_scene_object(scene, id);
     if (obj)
         obj->visible = visible;
+}
+
+void hal_object_set_smooth_shading(hal_scene *scene, hal_object_id id,
+                                   bool smooth) {
+    hal_object *obj = hal_scene_object(scene, id);
+    if (obj)
+        obj->smooth_shading = smooth;
 }
