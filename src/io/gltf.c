@@ -117,6 +117,8 @@ typedef struct gltf_node_out {
 static bool gltf_write_mesh(hal_object *obj, buf *bin, size_t *out_pos_off,
                             size_t *out_nrm_off, size_t *out_uv_off,
                             size_t *out_idx_off, bool *out_has_uv,
+                            bool *out_has_skin, size_t *out_joint_off,
+                            size_t *out_weight_off,
                             size_t *out_tri_count,
                             size_t *out_vert_count, hal_vec3f *out_min,
                             hal_vec3f *out_max) {
@@ -134,11 +136,13 @@ static bool gltf_write_mesh(hal_object *obj, buf *bin, size_t *out_pos_off,
             tri_count += n - 2;
     }
 
-    /* Per-corner UVs force a duplicated stream even for smooth
-     * shading (seams must survive); otherwise smooth meshes share
-     * the original verts. */
+    /* Per-corner UVs or a skin force a duplicated stream even for
+     * smooth shading (seams / per-corner joint data must survive);
+     * otherwise smooth meshes share the original verts. */
     bool has_uv = m->uvs != NULL && m->uvs_valid;
-    bool smooth = vn != NULL && !has_uv;
+    bool has_skin = obj->skin_armature != HAL_OBJECT_ID_NONE &&
+                    m->skin_weights != NULL && m->skin_bones != NULL;
+    bool smooth = vn != NULL && !has_uv && !has_skin;
     size_t out_verts = smooth ? m->vert_count : tri_count * 3;
 
     while (bin->len % 4 != 0)
@@ -221,6 +225,68 @@ static bool gltf_write_mesh(hal_object *obj, buf *bin, size_t *out_pos_off,
         }
     }
 
+    /* Skin influences: JOINTS_0 (UNSIGNED_BYTE VEC4, the bone index
+     * into the skin's joints array) and WEIGHTS_0 (FLOAT VEC4,
+     * renormalized). Unused slots carry joint 0 with weight 0. For
+     * the duplicated stream a corner->mesh-vert map is built once
+     * (the same order the position walk writes). */
+    size_t joint_off = bin->len;
+    size_t weight_off = bin->len;
+    if (has_skin) {
+        while (bin->len % 4 != 0)
+            if (!buf_put(bin, "\0", 1))
+                return false;
+        joint_off = bin->len;
+        weight_off = bin->len + out_verts * 4; /* u8 vec4 first */
+
+        hal_u32 *corner_verts = NULL;
+        if (!smooth) {
+            corner_verts = malloc(out_verts * sizeof(hal_u32));
+            if (!corner_verts)
+                return false;
+            size_t seen = 0;
+            for (size_t f = 0; f < m->face_count; f++) {
+                size_t n = m->face_off[f + 1] - m->face_off[f];
+                for (size_t k = 0; k + 2 < n; k++) {
+                    corner_verts[seen++] = m->loops[m->face_off[f]];
+                    corner_verts[seen++] =
+                        m->loops[m->face_off[f] + k + 1];
+                    corner_verts[seen++] =
+                        m->loops[m->face_off[f] + k + 2];
+                }
+            }
+        }
+
+        for (size_t pass = 0; pass < 2; pass++) {
+            for (size_t v = 0; v < out_verts; v++) {
+                size_t mv = smooth ? v : corner_verts[v];
+                hal_u8 joints[4] = { 0, 0, 0, 0 };
+                hal_f32 weights[4] = { 0, 0, 0, 0 };
+                hal_f32 sum = 0.0f;
+                for (int i = 0; i < 4; i++) {
+                    size_t wi = mv * 4 + (size_t)i;
+                    hal_i32 b = m->skin_bones[wi];
+                    hal_f32 w = m->skin_weights[wi];
+                    if (b < 0 || w <= 0.0f)
+                        continue;
+                    joints[i] = (hal_u8)b;
+                    weights[i] = w;
+                    sum += w;
+                }
+                if (sum > 1e-6f)
+                    for (int i = 0; i < 4; i++)
+                        weights[i] /= sum;
+                if (pass == 0) {
+                    if (!buf_put(bin, joints, sizeof(joints)))
+                        return false;
+                } else if (!buf_put(bin, weights, sizeof(weights))) {
+                    return false;
+                }
+            }
+        }
+        free(corner_verts);
+    }
+
     size_t idx_off = bin->len;
     if (smooth) {
         for (size_t f = 0; f < m->face_count; f++) {
@@ -244,6 +310,9 @@ static bool gltf_write_mesh(hal_object *obj, buf *bin, size_t *out_pos_off,
     *out_uv_off = uv_off;
     *out_idx_off = idx_off;
     *out_has_uv = has_uv;
+    *out_has_skin = has_skin;
+    *out_joint_off = joint_off;
+    *out_weight_off = weight_off;
     *out_tri_count = tri_count;
     *out_vert_count = out_verts;
     *out_min = bmin;
@@ -273,6 +342,12 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
         int material; /* object material index or -1            */
         size_t a_pos, a_nrm, a_uv, a_idx; /* accessor indices    */
         size_t v_pos, v_nrm, v_uv, v_idx; /* bufferView indices  */
+        bool has_skin;
+        size_t joint_off, weight_off;
+        size_t a_jnt, a_wgt; /* JOINTS_0 / WEIGHTS_0 accessors    */
+        size_t v_jnt, v_wgt;
+        size_t skin_index;   /* into the skins array, when skinned */
+        size_t object_index; /* the owning scene object           */
     } mesh_blocks;
     mesh_blocks *blocks =
         calloc(mesh_count ? mesh_count : 1, sizeof(mesh_blocks));
@@ -280,6 +355,31 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
         io_err(err, err_cap, "out of memory");
         return HAL_ERR_OUT_OF_MEMORY;
     }
+
+    /* Joint nodes: one per bone, appended after the object nodes.
+     * joint_node(obj, bone) = scene->count + arm_bone_base[obj] +
+     * bone. */
+    size_t *arm_bone_base =
+        calloc(scene->count ? scene->count : 1, sizeof(size_t));
+    if (!arm_bone_base) {
+        free(blocks);
+        io_err(err, err_cap, "out of memory");
+        return HAL_ERR_OUT_OF_MEMORY;
+    }
+    {
+        size_t running = 0;
+        for (size_t i = 0; i < scene->count; i++) {
+            arm_bone_base[i] = running;
+            if (scene->objects[i].armature)
+                running += scene->objects[i].armature->count;
+        }
+    }
+#define JOINT_NODE(obj_idx, bone) \
+    (scene->count + arm_bone_base[obj_idx] + (size_t)(bone))
+
+    /* Skins: one per skinned mesh (inverse bind matrices depend on
+     * the mesh's own world transform). */
+    size_t skin_count = 0;
 
     size_t bi = 0;
     for (size_t i = 0; i < scene->count; i++) {
@@ -289,21 +389,32 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
         if (!gltf_write_mesh(obj, &bin, &blocks[bi].pos_off,
                              &blocks[bi].nrm_off, &blocks[bi].uv_off,
                              &blocks[bi].idx_off, &blocks[bi].has_uv,
+                             &blocks[bi].has_skin, &blocks[bi].joint_off,
+                             &blocks[bi].weight_off,
                              &blocks[bi].tri_count,
                              &blocks[bi].vert_count, &blocks[bi].bmin,
                              &blocks[bi].bmax)) {
             free(bin.data);
             free(blocks);
+            free(arm_bone_base);
             io_err(err, err_cap, "out of memory while writing buffers");
             return HAL_ERR_OUT_OF_MEMORY;
         }
         blocks[bi].material = obj->material;
+        blocks[bi].object_index = i;
+        if (blocks[bi].has_skin) {
+            blocks[bi].skin_index = skin_count;
+            skin_count++;
+        }
         bi++;
     }
 
     /* Sequential accessor / bufferView indices (UV slots exist only
      * for meshes with UVs, so fixed strides would misnumber mixed
      * scenes). */
+    size_t mesh_acc_count = 0;
+    size_t ibm_acc_base = 0;
+    size_t ibm_view_base = 0;
     {
         size_t acc = 0, view = 0;
         for (size_t mi = 0; mi < mesh_count; mi++) {
@@ -311,11 +422,26 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
             blocks[mi].a_nrm = acc++;
             blocks[mi].a_uv = blocks[mi].has_uv ? acc++ : (size_t)-1;
             blocks[mi].a_idx = acc++;
+            if (blocks[mi].has_skin) {
+                blocks[mi].a_jnt = acc++;
+                blocks[mi].a_wgt = acc++;
+            }
             blocks[mi].v_pos = view++;
             blocks[mi].v_nrm = view++;
             blocks[mi].v_uv = blocks[mi].has_uv ? view++ : (size_t)-1;
             blocks[mi].v_idx = view++;
+            if (blocks[mi].has_skin) {
+                blocks[mi].v_jnt = view++;
+                blocks[mi].v_wgt = view++;
+            }
         }
+        mesh_acc_count = acc;
+        /* The skins' inverseBindMatrices accessors follow; the
+         * animation sampler accessors come after those. */
+        ibm_acc_base = acc;
+        ibm_view_base = view;
+        acc += skin_count;
+        view += skin_count;
     }
 
     /* Image embedding: scene images referenced by any exported
@@ -399,27 +525,39 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
         if (!buf_puts(&js, "\"name\":") ||
             !buf_put_json_str(&js, o->name))
             goto oom;
-        /* children array once, listing every object parented here. */
-        first = true;
-        for (size_t c = 0; c < scene->count; c++)
-            if (scene->objects[c].parent == o->id) {
-                if (first) {
-                    if (!buf_puts(&js, ",\"children\":["))
-                        goto oom;
-                    bool inner_first = true;
-                    for (size_t c2 = 0; c2 < scene->count; c2++)
-                        if (scene->objects[c2].parent == o->id) {
+        /* children: objects parented here, plus (for armatures) the
+         * root bones' joint nodes. */
+        {
+            bool any_child = false;
+            for (size_t c = 0; c < scene->count; c++)
+                if (scene->objects[c].parent == o->id)
+                    any_child = true;
+            bool any_joint =
+                o->armature != NULL && o->armature->count > 0;
+            if (any_child || any_joint) {
+                if (!buf_puts(&js, ",\"children\":["))
+                    goto oom;
+                bool inner_first = true;
+                for (size_t c2 = 0; c2 < scene->count; c2++)
+                    if (scene->objects[c2].parent == o->id) {
+                        if (!buf_putf(&js, "%s%zu",
+                                      inner_first ? "" : ",", c2))
+                            goto oom;
+                        inner_first = false;
+                    }
+                if (any_joint)
+                    for (size_t b = 0; b < o->armature->count; b++)
+                        if (o->armature->bones[b].parent < 0) {
                             if (!buf_putf(&js, "%s%zu",
-                                          inner_first ? "" : ",", c2))
+                                          inner_first ? "" : ",",
+                                          JOINT_NODE(i, b)))
                                 goto oom;
                             inner_first = false;
                         }
-                    if (!buf_puts(&js, "]"))
-                        goto oom;
-                    first = false;
-                }
-                break;
+                if (!buf_puts(&js, "]"))
+                    goto oom;
             }
+        }
         if (o->mesh) {
             size_t j = 0;
             for (size_t k = 0; k <= i; k++)
@@ -427,6 +565,16 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                     j++;
             if (!buf_putf(&js, ",\"mesh\":%zu", j - 1))
                 goto oom;
+            /* glTF puts "skin" on the NODE: find this object's mesh
+             * block and reference its skin. */
+            for (size_t mb = 0; mb < mesh_count; mb++)
+                if (blocks[mb].object_index == i &&
+                    blocks[mb].has_skin) {
+                    if (!buf_putf(&js, ",\"skin\":%zu",
+                                  blocks[mb].skin_index))
+                        goto oom;
+                    break;
+                }
         }
         if (!buf_putf(&js,
                       ",\"translation\":[%.9g,%.9g,%.9g],"
@@ -440,6 +588,57 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
             goto oom;
         if (!buf_puts(&js, "}"))
             goto oom;
+    }
+    /* Joint nodes (bones). Local transform: translation = the bone's
+     * REST head (armature space — a constant offset in the parent's
+     * frame, matching Halcyon's pose math), rotation = the local pose
+     * (identity at rest). Children: child bones' joints. */
+    for (size_t i = 0; i < scene->count; i++) {
+        hal_object *ao = &scene->objects[i];
+        if (!ao->armature)
+            continue;
+        for (size_t b = 0; b < ao->armature->count; b++) {
+            const hal_bone *bone = &ao->armature->bones[b];
+            /* The very first entry of the whole nodes array has no
+             * leading comma; every other joint node does (the object
+             * nodes came first). */
+            bool first_array_entry =
+                scene->count == 0 && i == 0 && b == 0;
+            if (!buf_putf(&js, "%s{", first_array_entry ? "" : ","))
+                goto oom;
+            if (!buf_puts(&js, "\"name\":") ||
+                !buf_put_json_str(&js, bone->name))
+                goto oom;
+            if (!buf_putf(&js,
+                          ",\"translation\":[%.9g,%.9g,%.9g],"
+                          "\"rotation\":[%.9g,%.9g,%.9g,%.9g]",
+                          (double)bone->head.x, (double)bone->head.y,
+                          (double)bone->head.z, (double)bone->pose.x,
+                          (double)bone->pose.y, (double)bone->pose.z,
+                          (double)bone->pose.w))
+                goto oom;
+            bool any_child = false;
+            for (size_t c = 0; c < ao->armature->count; c++)
+                if (ao->armature->bones[c].parent == (int)b)
+                    any_child = true;
+            if (any_child) {
+                if (!buf_puts(&js, ",\"children\":["))
+                    goto oom;
+                bool inner_first = true;
+                for (size_t c = 0; c < ao->armature->count; c++)
+                    if (ao->armature->bones[c].parent == (int)b) {
+                        if (!buf_putf(&js, "%s%zu",
+                                      inner_first ? "" : ",",
+                                      JOINT_NODE(i, c)))
+                            goto oom;
+                        inner_first = false;
+                    }
+                if (!buf_puts(&js, "]"))
+                    goto oom;
+            }
+            if (!buf_puts(&js, "}"))
+                goto oom;
+        }
     }
     if (!buf_puts(&js, "],"))
         goto oom;
@@ -471,6 +670,10 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                          b->a_pos, b->a_nrm) &&
                 (!b->has_uv ||
                  buf_putf(&attrs, ",\"TEXCOORD_0\":%zu", b->a_uv)) &&
+                (!b->has_skin ||
+                 buf_putf(&attrs,
+                          ",\"JOINTS_0\":%zu,\"WEIGHTS_0\":%zu",
+                          b->a_jnt, b->a_wgt)) &&
                 buf_put(&attrs, "\0", 1); /* %s needs a C string */
             if (a_ok)
                 a_ok = buf_putf(&js,
@@ -495,13 +698,87 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
     if (!buf_puts(&js, "],"))
         goto oom;
 
+    /* Skins (pass 1.4): inverse bind matrices into the BIN buffer.
+     * IBM_i = rest_i^-1 * A^-1 * Wm (rest_i = T(head_i) in armature
+     * space; A = armature world; Wm = mesh world), so glTF's
+     * sum(w * G_i * IBM_i * v) reproduces Halcyon's skinning exactly
+     * (at rest the sum collapses to Wm * v). */
+    typedef struct skin_info {
+        size_t mesh_block;  /* index into blocks                    */
+        size_t arm_obj;     /* the armature object index            */
+        size_t ibm_off;
+        size_t bone_count;
+        size_t ibm_acc, ibm_view;
+        size_t root_bone_joint; /* node id, for "skeleton"          */
+    } skin_info;
+    skin_info *skins_info =
+        calloc(skin_count ? skin_count : 1, sizeof(skin_info));
+    if (!skins_info)
+        goto oom;
+    {
+        size_t si = 0;
+        for (size_t mi = 0; mi < mesh_count; mi++) {
+            if (!blocks[mi].has_skin)
+                continue;
+            hal_object *mesh_obj =
+                &scene->objects[blocks[mi].object_index];
+            hal_object *arm_obj =
+                hal_scene_object(scene, mesh_obj->skin_armature);
+            if (!arm_obj || !arm_obj->armature) {
+                /* Unresolvable skin: drop the reference. */
+                blocks[mi].has_skin = false;
+                continue;
+            }
+            hal_armature *arm = arm_obj->armature;
+            hal_bone_pose *rest = malloc(arm->count * sizeof(*rest));
+            if (!rest)
+                goto oom;
+            hal_armature_rest_pose(arm, rest);
+            hal_mat4f arm_world_inv = hal_mat4f_invert(
+                hal_object_world_matrix(scene, arm_obj));
+            hal_mat4f to_armature = hal_mat4f_mul(
+                arm_world_inv,
+                hal_object_world_matrix(scene, mesh_obj));
+
+            while (bin.len % 4 != 0)
+                if (!buf_put(&bin, "\0", 1))
+                    goto oom;
+            size_t off = bin.len;
+            for (size_t b = 0; b < arm->count; b++) {
+                hal_mat4f ibm = hal_mat4f_mul(
+                    hal_mat4f_invert(rest[b].matrix), to_armature);
+                if (!buf_put(&bin, &ibm, sizeof(ibm)))
+                    goto oom;
+            }
+            free(rest);
+
+            skins_info[si].mesh_block = mi;
+            skins_info[si].arm_obj = (size_t)-1;
+            for (size_t oi = 0; oi < scene->count; oi++)
+                if (scene->objects[oi].id == arm_obj->id)
+                    skins_info[si].arm_obj = oi;
+            skins_info[si].ibm_off = off;
+            skins_info[si].bone_count = arm->count;
+            skins_info[si].ibm_acc = ibm_acc_base + si;
+            skins_info[si].ibm_view = ibm_view_base + si;
+            skins_info[si].root_bone_joint = (size_t)-1;
+            for (size_t b = 0; b < arm->count; b++)
+                if (arm->bones[b].parent < 0) {
+                    skins_info[si].root_bone_joint =
+                        JOINT_NODE(skins_info[si].arm_obj, b);
+                    break;
+                }
+            si++;
+        }
+    }
+
     /* Animations (pass 1.5): bake every clip at 30 fps into the BIN
      * buffer (LINEAR samplers; in-app easing bakes into the samples)
      * and collect the channels/samplers JSON + the accessor data the
      * sections below append. */
-    size_t mesh_acc_count = 0;
-    for (size_t mi = 0; mi < mesh_count; mi++)
-        mesh_acc_count += blocks[mi].has_uv ? 4 : 3;
+    /* Animation sampler accessors follow the mesh accessors AND the
+     * skins' IBM accessors. */
+    size_t anim_acc_base = ibm_acc_base + skin_count;
     typedef struct sampler_block {
         size_t in_off, out_off, frames;
         int comps;
@@ -612,11 +889,67 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                     anim_sampler_count++;
                 }
             }
+            /* Bone channels: rotation paths on joint nodes. */
+            for (size_t c = 0; c < clip->count; c++) {
+                const hal_anim_channel *ch = &clip->channels[c];
+                if (ch->type != HAL_CH_BONE)
+                    continue;
+                size_t aoi = (size_t)-1;
+                for (size_t oi = 0; oi < scene->count; oi++)
+                    if (scene->objects[oi].id == ch->object)
+                        aoi = oi;
+                if (aoi == (size_t)-1)
+                    continue;
+
+                while (bin.len % 4 != 0)
+                    if (!buf_put(&bin, "\0", 1))
+                        goto oom;
+                size_t in_off = bin.len;
+                for (size_t f2 = 0; f2 < frames; f2++) {
+                    hal_f32 t = clip->start +
+                                (hal_f32)f2 / (hal_f32)(frames - 1) *
+                                    span;
+                    if (!buf_put(&bin, &t, sizeof(hal_f32)))
+                        goto oom;
+                }
+                size_t out_off = bin.len;
+                for (size_t f2 = 0; f2 < frames; f2++) {
+                    hal_f32 t = clip->start +
+                                (hal_f32)f2 / (hal_f32)(frames - 1) *
+                                    span;
+                    hal_quatf r = hal_quatf_identity();
+                    hal_clip_sample_bone(clip, ch->object, ch->bone,
+                                         t, &r);
+                    if (!buf_put(&bin, &r, sizeof(r)))
+                        goto oom;
+                }
+                sampler_block *grown = realloc(
+                    anim_samplers,
+                    (anim_sampler_count + 1) * sizeof(*grown));
+                if (!grown)
+                    goto oom;
+                anim_samplers = grown;
+                anim_samplers[anim_sampler_count].in_off = in_off;
+                anim_samplers[anim_sampler_count].out_off = out_off;
+                anim_samplers[anim_sampler_count].frames = frames;
+                anim_samplers[anim_sampler_count].comps = 4;
+
+                if (!buf_putf(&anims_json,
+                              "%s{\"sampler\":%zu,"
+                              "\"target\":{\"node\":%zu,"
+                              "\"path\":\"rotation\"}}",
+                              first_ch ? "" : ",", anim_sampler_count,
+                              JOINT_NODE(aoi, (size_t)ch->bone)))
+                    goto oom;
+                first_ch = false;
+                anim_sampler_count++;
+            }
+
             if (!buf_puts(&anims_json, "],\"samplers\":["))
                 goto oom;
             for (size_t k = clip_first_sampler; k < anim_sampler_count;
                  k++) {
-                size_t acc_in = mesh_acc_count + k * 2;
+                size_t acc_in = anim_acc_base + k * 2;
                 if (!buf_putf(&anims_json,
                               "%s{\"input\":%zu,\"output\":%zu,"
                               "\"interpolation\":\"LINEAR\"}",
@@ -663,10 +996,37 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                       "\"count\":%zu,\"type\":\"SCALAR\"}",
                       b->v_idx, b->tri_count * 3))
             goto oom;
+        if (b->has_skin) {
+            if (!buf_putf(&js,
+                          ",{\"bufferView\":%zu,"
+                          "\"componentType\":5121,"
+                          "\"count\":%zu,\"type\":\"VEC4\"}",
+                          b->v_jnt, b->vert_count))
+                goto oom;
+            if (!buf_putf(&js,
+                          ",{\"bufferView\":%zu,"
+                          "\"componentType\":5126,"
+                          "\"count\":%zu,\"type\":\"VEC4\"}",
+                          b->v_wgt, b->vert_count))
+                goto oom;
+        }
+    }
+    /* The skins' inverseBindMatrices accessors. */
+    for (size_t si = 0; si < skin_count; si++) {
+        if (!buf_putf(&js,
+                      ",{\"bufferView\":%zu,"
+                      "\"componentType\":5126,\"count\":%zu,"
+                      "\"type\":\"MAT4\"}",
+                      skins_info[si].ibm_view,
+                      skins_info[si].bone_count))
+            goto oom;
     }
     for (size_t k = 0; k < anim_sampler_count; k++) {
         const sampler_block *sb = &anim_samplers[k];
-        size_t view_in = mesh_acc_count + k * 2;
+        /* Sampler views follow the mesh views, the image views AND
+         * the skins' IBM views. */
+        size_t view_in =
+            mesh_acc_count + image_out_count + skin_count + k * 2;
         if (!buf_putf(&js,
                       ",{\"bufferView\":%zu,\"componentType\":5126,"
                       "\"count\":%zu,\"type\":\"SCALAR\"},"
@@ -699,7 +1059,25 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                       "\"byteLength\":%zu}",
                       b->idx_off, b->tri_count * 3 * 4))
             goto oom;
+        if (b->has_skin) {
+            if (!buf_putf(&js,
+                          ",{\"buffer\":0,\"byteOffset\":%zu,"
+                          "\"byteLength\":%zu},"
+                          "{\"buffer\":0,\"byteOffset\":%zu,"
+                          "\"byteLength\":%zu}",
+                          b->joint_off, b->vert_count * 4,
+                          b->weight_off, b->vert_count * 16))
+                goto oom;
+        }
     }
+    /* IBM views. */
+    for (size_t si = 0; si < skin_count; si++)
+        if (!buf_putf(&js,
+                      ",{\"buffer\":0,\"byteOffset\":%zu,"
+                      "\"byteLength\":%zu}",
+                      skins_info[si].ibm_off,
+                      skins_info[si].bone_count * 64))
+            goto oom;
     /* Image bufferViews follow the mesh slots. */
     {
         size_t mesh_views = mesh_count * 3;
@@ -821,6 +1199,30 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
                 goto oom;
         }
     }
+    /* skins array (before animations; glTF allows any order). */
+    if (skin_count > 0) {
+        if (!buf_puts(&js, ",\"skins\":["))
+            goto oom;
+        for (size_t si = 0; si < skin_count; si++) {
+            const skin_info *sk = &skins_info[si];
+            if (si && !buf_puts(&js, ","))
+                goto oom;
+            if (!buf_puts(&js, "{\"joints\":["))
+                goto oom;
+            for (size_t b = 0; b < sk->bone_count; b++) {
+                if (!buf_putf(&js, "%s%zu", b ? "," : "",
+                              JOINT_NODE(sk->arm_obj, b)))
+                    goto oom;
+            }
+            if (!buf_putf(&js,
+                          "],\"inverseBindMatrices\":%zu,"
+                          "\"skeleton\":%zu}",
+                          sk->ibm_acc, sk->root_bone_joint))
+                goto oom;
+        }
+        if (!buf_puts(&js, "]"))
+            goto oom;
+    }
     if (anims_json.len &&
         !buf_put(&js, anims_json.data, anims_json.len))
         goto oom;
@@ -871,6 +1273,8 @@ hal_result hal_io_gltf_export(hal_scene *scene, const char *path,
         free(js.data);
         free(blocks);
         free(images_out);
+        free(skins_info);
+        free(arm_bone_base);
         if (!ok) {
             io_err(err, err_cap, "write failed");
             return HAL_ERR_IO;
@@ -885,6 +1289,8 @@ oom:
     free(images_out);
     free(anim_samplers);
     free(anims_json.data);
+    free(skins_info);
+    free(arm_bone_base);
     io_err(err, err_cap, "out of memory");
     return HAL_ERR_OUT_OF_MEMORY;
 }
@@ -1252,9 +1658,13 @@ static bool read_accessor(const hal_json *accessors, size_t index,
     const hal_json *bo = json_get(a, "byteOffset");
     if (bo && bo->type == HAL_JSON_NUMBER)
         out->byte_offset = (size_t)bo->number;
-    out->vec_len = strcmp(type->string, "VEC3") == 0
-                       ? 3
-                       : strcmp(type->string, "SCALAR") == 0 ? 1 : -1;
+    out->vec_len = strcmp(type->string, "SCALAR") == 0
+                       ? 1
+                       : strcmp(type->string, "VEC2") == 0   ? 2
+                       : strcmp(type->string, "VEC3") == 0   ? 3
+                       : strcmp(type->string, "VEC4") == 0   ? 4
+                       : strcmp(type->string, "MAT4") == 0   ? 16
+                                                            : -1;
     if (out->vec_len < 0) {
         io_err(err, err_cap,
                "glTF: unsupported accessor type %s", type->string);
@@ -1332,12 +1742,20 @@ static double acc_read(const glb *g, const acc_info *a, size_t i,
 /* Recursively collects world transforms for nodes with meshes. */
 
 
+/* Import bookkeeping: which scene object each glTF node produced,
+ * and which skin each mesh node referenced. */
+typedef struct imp_ctx {
+    hal_object_id *node_obj; /* per node index, 0 = none   */
+    int *node_skin;          /* per node index, -1 = none  */
+    size_t node_count;
+} imp_ctx;
+
 static bool collect_nodes(const hal_json *nodes, size_t index,
                           hal_mat4f parent, hal_scene *scene,
                           const hal_json *meshes,
                           const hal_json *accessors,
                           const hal_json *views, const glb *g,
-                          char *err, size_t err_cap) {
+                          imp_ctx *ctx, char *err, size_t err_cap) {
     if (!nodes || nodes->type != HAL_JSON_ARRAY ||
         index >= nodes->count) {
         io_err(err, err_cap, "glTF: node %zu out of range", index);
@@ -1443,7 +1861,49 @@ static bool collect_nodes(const hal_json *nodes, size_t index,
             }
         }
         hal_mesh_rebuild_edges(m);
+
+        /* Skin influences (JOINTS_0/WEIGHTS_0): values are positions
+         * in the referenced skin's joints array; the skins pass below
+         * maps them onto the rebuilt armature's bone indices. */
+        const hal_json *jnt_ref = json_get(attrs, "JOINTS_0");
+        const hal_json *wgt_ref = json_get(attrs, "WEIGHTS_0");
+        if (jnt_ref && wgt_ref && jnt_ref->type == HAL_JSON_NUMBER &&
+            wgt_ref->type == HAL_JSON_NUMBER) {
+            acc_info jnt, wgt;
+            if (read_accessor(accessors, (size_t)jnt_ref->number,
+                              views, g, &jnt, err, err_cap) &&
+                read_accessor(accessors, (size_t)wgt_ref->number,
+                              views, g, &wgt, err, err_cap) &&
+                jnt.vec_len == 4 && wgt.vec_len == 4 &&
+                jnt.count == wgt.count && jnt.count == pos.count) {
+                hal_f32 *w = calloc(pos.count * 4, sizeof(hal_f32));
+                hal_i32 *b = malloc(pos.count * 4 * sizeof(hal_i32));
+                if (w && b) {
+                    for (size_t v = 0; v < pos.count; v++)
+                        for (size_t k = 0; k < 4; k++) {
+                            b[v * 4 + k] =
+                                (hal_i32)acc_read(g, &jnt, v, (int)k);
+                            w[v * 4 + k] =
+                                (hal_f32)acc_read(g, &wgt, v, (int)k);
+                        }
+                    free(m->skin_weights);
+                    free(m->skin_bones);
+                    m->skin_weights = w;
+                    m->skin_bones = b;
+                } else {
+                    free(w);
+                    free(b);
+                }
+            }
+        }
+
         hal_object_set_mesh(scene, id, m);
+        if (ctx && index < ctx->node_count)
+            ctx->node_obj[index] = id;
+        const hal_json *skin_ref = json_get(n, "skin");
+        if (ctx && index < ctx->node_count && skin_ref &&
+            skin_ref->type == HAL_JSON_NUMBER)
+            ctx->node_skin[index] = (int)skin_ref->number;
 
         /* Bake the world transform back to TRS. */
         hal_vec3f wloc;
@@ -1462,7 +1922,7 @@ static bool collect_nodes(const hal_json *nodes, size_t index,
             if (!ci || ci->type != HAL_JSON_NUMBER)
                 continue;
             if (!collect_nodes(nodes, (size_t)ci->number, world, scene,
-                               meshes, accessors, views, g, err,
+                               meshes, accessors, views, g, ctx, err,
                                err_cap))
                 return false;
         }
@@ -1559,6 +2019,8 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
     const hal_json *meshes = json_get(root, "meshes");
     const hal_json *accessors = json_get(root, "accessors");
     const hal_json *views = json_get(root, "bufferViews");
+    const hal_json *skins = json_get(root, "skins");
+    const hal_json *anims = json_get(root, "animations");
     const hal_json *scenes = json_get(root, "scenes");
     const hal_json *scene0 = scenes ? json_get(scenes->type ==
                                                        HAL_JSON_ARRAY
@@ -1567,7 +2029,23 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
                                                "nodes")
                                     : NULL;
 
-    bool ok = true;
+    /* Import bookkeeping (node -> object / skin). */
+    imp_ctx ictx = { 0 };
+    size_t node_count = nodes && nodes->type == HAL_JSON_ARRAY
+                            ? nodes->count
+                            : 0;
+    ictx.node_count = node_count;
+    ictx.node_obj =
+        calloc(node_count ? node_count : 1, sizeof(hal_object_id));
+    ictx.node_skin = malloc((node_count ? node_count : 1) * sizeof(int));
+    bool ctx_ok = ictx.node_obj && ictx.node_skin;
+    if (ctx_ok)
+        for (size_t i = 0; i < node_count; i++) {
+            ictx.node_obj[i] = HAL_OBJECT_ID_NONE;
+            ictx.node_skin[i] = -1;
+        }
+
+    bool ok = ctx_ok;
     if (nodes && nodes->type == HAL_JSON_ARRAY) {
         if (scene0 && scene0->type == HAL_JSON_ARRAY) {
             for (size_t i = 0; ok && i < scene0->count; i++) {
@@ -1576,19 +2054,366 @@ hal_result hal_io_gltf_import(const char *path, hal_scene **out_scene,
                     ok = collect_nodes(nodes, (size_t)ni->number,
                                        hal_mat4f_identity(), scene,
                                        meshes, accessors, views, &g,
-                                       err, err_cap);
+                                       &ictx, err, err_cap);
             }
         } else {
             /* No scene declaration: import every node. */
             for (size_t i = 0; ok && i < nodes->count; i++)
                 ok = collect_nodes(nodes, i, hal_mat4f_identity(),
                                    scene, meshes, accessors, views,
-                                   &g, err, err_cap);
+                                   &g, &ictx, err, err_cap);
+        }
+    }
+
+    /* ---- Skins pass: rebuild armatures from joint nodes and attach
+     * the imported weights. Joint world translations become bone
+     * heads (glTF joints carry no tails — a +Y stub is synthesized);
+     * joint local rotations become bone poses. NOTE (honest): the
+     * file's inverseBindMatrices are not consulted — Halcyon derives
+     * bind matrices from the rebuilt REST pose, which matches files
+     * exported by Halcyon exactly and approximates foreign files
+     * whose joints have rest rotations. */
+    if (ok && skins && skins->type == HAL_JSON_ARRAY) {
+        /* parent-of map from children lists. */
+        int *parent_of =
+            malloc((node_count ? node_count : 1) * sizeof(int));
+        hal_mat4f *world =
+            malloc((node_count ? node_count : 1) * sizeof(hal_mat4f));
+        if (parent_of && world) {
+            for (size_t i = 0; i < node_count; i++)
+                parent_of[i] = -1;
+            for (size_t i = 0; i < node_count; i++) {
+                const hal_json *n = nodes->items[i];
+                const hal_json *ch = json_get(n, "children");
+                if (ch && ch->type == HAL_JSON_ARRAY)
+                    for (size_t c = 0; c < ch->count; c++)
+                        if (ch->items[c] &&
+                            ch->items[c]->type == HAL_JSON_NUMBER) {
+                            size_t ci2 =
+                                (size_t)ch->items[c]->number;
+                            if (ci2 < node_count)
+                                parent_of[ci2] = (int)i;
+                        }
+            }
+            /* Worlds via memoized recursion (iterative with a stack
+             * to keep depth bounded). */
+            for (size_t i = 0; i < node_count; i++)
+                world[i] = hal_mat4f_identity();
+            bool *done = calloc(node_count ? node_count : 1, sizeof(bool));
+            if (done) {
+                size_t *stack =
+                    malloc((node_count ? node_count : 1) * sizeof(size_t));
+                if (stack) {
+                    for (size_t root_n = 0; root_n < node_count;
+                         root_n++) {
+                        if (parent_of[root_n] != -1)
+                            continue;
+                        /* depth-first with an explicit stack; children
+                         * are pushed after computing the parent world
+                         * (post-order would be wrong; do pre-order). */
+                        size_t sp = 0;
+                        stack[sp++] = root_n;
+                        while (sp > 0) {
+                            size_t ni = stack[--sp];
+                            if (done[ni])
+                                continue;
+                            const hal_json *n = nodes->items[ni];
+                            hal_vec3f loc = hal_vec3f_zero();
+                            hal_quatf rot = hal_quatf_identity();
+                            hal_vec3f scl = hal_vec3f_one();
+                            const hal_json *t = json_get(n, "translation");
+                            if (t)
+                                loc = hal_vec3f_make(
+                                    (hal_f32)json_num(t, 0, 0),
+                                    (hal_f32)json_num(t, 1, 0),
+                                    (hal_f32)json_num(t, 2, 0));
+                            const hal_json *r = json_get(n, "rotation");
+                            if (r)
+                                rot = hal_quatf_make(
+                                    (hal_f32)json_num(r, 0, 0),
+                                    (hal_f32)json_num(r, 1, 0),
+                                    (hal_f32)json_num(r, 2, 0),
+                                    (hal_f32)json_num(r, 3, 1));
+                            const hal_json *sc = json_get(n, "scale");
+                            if (sc)
+                                scl = hal_vec3f_make(
+                                    (hal_f32)json_num(sc, 0, 1),
+                                    (hal_f32)json_num(sc, 1, 1),
+                                    (hal_f32)json_num(sc, 2, 1));
+                            hal_mat4f local =
+                                hal_mat4f_from_trs(loc, rot, scl);
+                            hal_mat4f parent_m =
+                                parent_of[ni] >= 0 &&
+                                        (size_t)parent_of[ni] < node_count
+                                    ? world[parent_of[ni]]
+                                    : hal_mat4f_identity();
+                            world[ni] =
+                                hal_mat4f_mul(parent_m, local);
+                            done[ni] = true;
+                            const hal_json *ch = json_get(n, "children");
+                            if (ch && ch->type == HAL_JSON_ARRAY)
+                                for (size_t c = 0; c < ch->count; c++)
+                                    if (ch->items[c] &&
+                                        ch->items[c]->type ==
+                                            HAL_JSON_NUMBER) {
+                                        size_t ci2 =
+                                            (size_t)ch->items[c]->number;
+                                        if (ci2 < node_count && !done[ci2])
+                                            stack[sp++] = ci2;
+                                    }
+                        }
+                    }
+                    free(stack);
+                }
+                free(done);
+            }
+
+            for (size_t s = 0; ok && s < skins->count; s++) {
+                const hal_json *sk = skins->items[s];
+                const hal_json *joints = json_get(sk, "joints");
+                if (!joints || joints->type != HAL_JSON_ARRAY ||
+                    joints->count == 0 || joints->count > 255)
+                    continue;
+                size_t bone_count = joints->count;
+
+                const hal_json *skel =
+                    json_get(sk, "skeleton");
+                const char *arm_name = "Armature";
+                if (skel && skel->type == HAL_JSON_NUMBER &&
+                    (size_t)skel->number < node_count) {
+                    const hal_json *n =
+                        nodes->items[(size_t)skel->number];
+                    const hal_json *nm = json_get(n, "name");
+                    if (nm && nm->type == HAL_JSON_STRING)
+                        arm_name = nm->string;
+                }
+                /* The armature object's world transform: the ROOT
+                 * joint's parent chain (the armature node). Halcyon
+                 * exports put the armature node above the root joints
+                 * with world = A, and joint locals = T(armature-space
+                 * head) * R(pose) — so the armature world is the
+                 * root joint's world minus its own head translation,
+                 * and bones import with their LOCAL translations as
+                 * armature-space heads (exact for Halcyon exports;
+                 * foreign skins, whose joint translations are usually
+                 * parent-relative, import approximately). */
+                /* The root joint: the first joint whose parent is not
+                 * itself a joint of this skin (usually the armature
+                 * node — parent_of is NOT -1 for it). Needs bone_of,
+                 * so it is computed after the map below. */
+                size_t root_node = (size_t)-1;
+                hal_object_id arm_id = hal_scene_object_add(
+                    scene, arm_name, HAL_OBJECT_ARMATURE);
+                hal_armature *arm = hal_armature_create();
+                hal_object_set_armature(scene, arm_id, arm);
+                if (!arm)
+                    continue;
+
+                /* node index -> bone index within this skin. */
+                int *bone_of =
+                    malloc((node_count ? node_count : 1) * sizeof(int));
+                if (!bone_of)
+                    continue;
+                for (size_t i = 0; i < node_count; i++)
+                    bone_of[i] = -1;
+                for (size_t b = 0; b < bone_count; b++) {
+                    const hal_json *jn = joints->items[b];
+                    if (jn && jn->type == HAL_JSON_NUMBER &&
+                        (size_t)jn->number < node_count)
+                        bone_of[(size_t)jn->number] = (int)b;
+                }
+
+                for (size_t b = 0; b < bone_count; b++) {
+                    const hal_json *jn = joints->items[b];
+                    if (!jn || jn->type != HAL_JSON_NUMBER)
+                        continue;
+                    size_t ni = (size_t)jn->number;
+                    if (ni >= node_count)
+                        continue;
+                    if (parent_of[ni] < 0 ||
+                        bone_of[parent_of[ni]] < 0) {
+                        root_node = ni;
+                        break;
+                    }
+                }
+                if (root_node != (size_t)-1 && root_node < node_count) {
+                    const hal_json *rn = nodes->items[root_node];
+                    const hal_json *rt = json_get(rn, "translation");
+                    hal_vec3f head0 = hal_vec3f_zero();
+                    if (rt)
+                        head0 = hal_vec3f_make(
+                            (hal_f32)json_num(rt, 0, 0),
+                            (hal_f32)json_num(rt, 1, 0),
+                            (hal_f32)json_num(rt, 2, 0));
+                    /* arm_world = world[root] * T(-head0) */
+                    hal_mat4f arm_world = world[root_node];
+                    hal_mat4f unshift = hal_mat4f_identity();
+                    unshift.m[12] = -head0.x;
+                    unshift.m[13] = -head0.y;
+                    unshift.m[14] = -head0.z;
+                    arm_world = hal_mat4f_mul(arm_world, unshift);
+                    hal_vec3f aloc;
+                    hal_quatf arot;
+                    hal_vec3f ascale;
+                    hal_mat4f_decompose_trs(arm_world, &aloc, &arot,
+                                            &ascale);
+                    hal_object_set_location(scene, arm_id, aloc);
+                    hal_object_set_rotation(scene, arm_id, arot);
+                    hal_object_set_scale(scene, arm_id, ascale);
+                }
+
+                for (size_t b = 0; b < bone_count; b++) {
+                    const hal_json *jn = joints->items[b];
+                    if (!jn || jn->type != HAL_JSON_NUMBER ||
+                        (size_t)jn->number >= node_count)
+                        continue;
+                    size_t ni = (size_t)jn->number;
+                    const hal_json *n = nodes->items[ni];
+                    /* Armature-space head = the joint's LOCAL
+                     * translation (Halcyon's export convention). */
+                    hal_vec3f head = hal_vec3f_zero();
+                    const hal_json *lt = json_get(n, "translation");
+                    if (lt)
+                        head = hal_vec3f_make(
+                            (hal_f32)json_num(lt, 0, 0),
+                            (hal_f32)json_num(lt, 1, 0),
+                            (hal_f32)json_num(lt, 2, 0));
+                    int parent_bone =
+                        parent_of[ni] >= 0 ? bone_of[parent_of[ni]] : -1;
+                    hal_quatf pose = hal_quatf_identity();
+                    const hal_json *r = json_get(n, "rotation");
+                    if (r)
+                        pose = hal_quatf_make(
+                            (hal_f32)json_num(r, 0, 0),
+                            (hal_f32)json_num(r, 1, 0),
+                            (hal_f32)json_num(r, 2, 0),
+                            (hal_f32)json_num(r, 3, 1));
+                    char bname[64];
+                    const hal_json *nm = json_get(n, "name");
+                    snprintf(bname, sizeof(bname), "%s",
+                             nm && nm->type == HAL_JSON_STRING
+                                 ? nm->string
+                                 : "Bone");
+                    hal_armature_bone_add(
+                        arm, bname, head,
+                        hal_vec3f_add(head,
+                                      hal_vec3f_make(0, 0.1f, 0)),
+                        parent_bone);
+                    arm->bones[b].pose = pose;
+                }
+
+                /* Attach every mesh node referencing this skin. */
+                for (size_t ni = 0; ni < node_count; ni++) {
+                    if (ni >= ictx.node_count ||
+                        ictx.node_skin[ni] != (int)s ||
+                        ictx.node_obj[ni] == HAL_OBJECT_ID_NONE)
+                        continue;
+                    hal_object *mo =
+                        hal_scene_object(scene, ictx.node_obj[ni]);
+                    if (mo && mo->mesh) {
+                        mo->skin_armature = arm_id;
+                        /* JOINTS_0 values are positions in the joints
+                         * array == bone indices already. */
+                    }
+                }
+                /* Bone animation channels for this armature (uses
+                 * bone_of below; freed after). */
+                if (anims && anims->type == HAL_JSON_ARRAY)
+                    for (size_t a = 0; a < anims->count; a++) {
+                        const hal_json *an = anims->items[a];
+                        const hal_json *channels =
+                            json_get(an, "channels");
+                        const hal_json *samplers =
+                            json_get(an, "samplers");
+                        const hal_json *aname =
+                            json_get(an, "name");
+                        if (!channels || !samplers ||
+                            channels->type != HAL_JSON_ARRAY ||
+                            samplers->type != HAL_JSON_ARRAY)
+                            continue;
+                        int clip_idx = hal_scene_clip_add(
+                            scene, aname && aname->type == HAL_JSON_STRING
+                                        ? aname->string
+                                        : "Imported");
+                        hal_clip *clip =
+                            hal_scene_clip(scene, clip_idx);
+                        if (!clip)
+                            continue;
+                        clip->end = 0.0f;
+                        for (size_t c = 0; c < channels->count;
+                             c++) {
+                            const hal_json *ch = channels->items[c];
+                            const hal_json *sref = json_get(ch, "sampler");
+                            const hal_json *tgt = json_get(ch, "target");
+                            const hal_json *nref =
+                                tgt ? json_get(tgt, "node") : NULL;
+                            const hal_json *ch_path =
+                                tgt ? json_get(tgt, "path") : NULL;
+                            if (!sref || !nref || !ch_path ||
+                                sref->type != HAL_JSON_NUMBER ||
+                                nref->type != HAL_JSON_NUMBER ||
+                                ch_path->type != HAL_JSON_STRING)
+                                continue;
+                            size_t target_node =
+                                (size_t)nref->number;
+                            if (target_node >= node_count ||
+                                bone_of[target_node] < 0)
+                                continue; /* not a joint here */
+                            int bone = bone_of[target_node];
+                            if (strcmp(ch_path->string, "rotation") != 0)
+                                continue; /* only joint rotations */
+                            size_t sidx = (size_t)sref->number;
+                            if (sidx >= samplers->count)
+                                continue;
+                            const hal_json *sm =
+                                samplers->items[sidx];
+                            const hal_json *iref = json_get(sm, "input");
+                            const hal_json *oref =
+                                json_get(sm, "output");
+                            if (!iref || !oref ||
+                                iref->type != HAL_JSON_NUMBER ||
+                                oref->type != HAL_JSON_NUMBER)
+                                continue;
+                            acc_info in, out;
+                            if (!read_accessor(accessors,
+                                               (size_t)iref->number,
+                                               views, &g, &in, err,
+                                               err_cap) ||
+                                !read_accessor(accessors,
+                                               (size_t)oref->number,
+                                               views, &g, &out, err,
+                                               err_cap) ||
+                                in.vec_len != 1 || out.vec_len != 4)
+                                continue;
+                            for (size_t k = 0; k < in.count &&
+                                             k < out.count;
+                                 k++) {
+                                hal_f32 t = (hal_f32)acc_read(&g, &in, k, 0);
+                                hal_quatf q = hal_quatf_make(
+                                    (hal_f32)acc_read(&g, &out, k, 0),
+                                    (hal_f32)acc_read(&g, &out, k, 1),
+                                    (hal_f32)acc_read(&g, &out, k, 2),
+                                    (hal_f32)acc_read(&g, &out, k, 3));
+                                hal_clip_key_rot(
+                                    clip, arm_id, bone, t, q,
+                                    HAL_INTERP_LINEAR);
+                            }
+                        }
+                    }
+                free(bone_of);
+            }
+            free(parent_of);
+            free(world);
+        } else {
+            free(parent_of);
+            free(world);
         }
     }
 
     hal_json_destroy(root);
     free(data);
+    free(ictx.node_obj);
+    free(ictx.node_skin);
 
     if (!ok) {
         hal_scene_destroy(scene);

@@ -308,3 +308,21 @@ int hal_clip_sample_object(const hal_clip *clip, hal_object_id object,
         *out_scale = scale;
     return mask;
 }
+
+bool hal_clip_sample_bone(const hal_clip *clip, hal_object_id armature,
+                          int bone, hal_f32 time, hal_quatf *out_rot) {
+    if (!clip || !out_rot)
+        return false;
+    for (size_t i = 0; i < clip->count; i++) {
+        const hal_anim_channel *ch = &clip->channels[i];
+        if (ch->type != HAL_CH_BONE || ch->object != armature ||
+            ch->bone != bone)
+            continue;
+        sample_result s = channel_sample(ch, time);
+        if (s.valid) {
+            *out_rot = s.rot;
+            return true;
+        }
+    }
+    return false;
+}

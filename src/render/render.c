@@ -405,9 +405,15 @@ void hal_render_view(hal_raster *raster, hal_scene *scene,
             hal_mesh_vert_normals(obj->mesh);
             posed_verts = malloc(obj->mesh->vert_count *
                                  sizeof(hal_vec3f));
+            /* mesh-local -> armature-local = A^-1 * Wm (the objects
+             * may sit at different transforms). */
+            hal_mat4f mesh_to_arm = hal_mat4f_mul(
+                hal_mat4f_invert(
+                    hal_object_world_matrix(scene, arm_obj)),
+                hal_object_world_matrix(scene, obj));
             if (posed_verts &&
-                hal_mesh_apply_pose(obj->mesh, arm_obj->armature,
-                                    posed_verts)) {
+                hal_mesh_apply_pose_ex(obj->mesh, arm_obj->armature,
+                                       mesh_to_arm, posed_verts)) {
                 render_mesh_src = *obj->mesh;
                 render_mesh_src.verts = posed_verts;
             }

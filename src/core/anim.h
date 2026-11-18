@@ -107,6 +107,11 @@ int hal_clip_sample_object(const hal_clip *clip, hal_object_id object,
                            hal_f32 time, hal_vec3f *out_loc,
                            hal_quatf *out_rot, hal_vec3f *out_scale);
 
+/* Evaluates ONE bone's pose channel at `time`; false when the clip
+ * has no channel for that bone (the rest pose applies). */
+bool hal_clip_sample_bone(const hal_clip *clip, hal_object_id armature,
+                          int bone, hal_f32 time, hal_quatf *out_rot);
+
 #ifdef __cplusplus
 }
 #endif

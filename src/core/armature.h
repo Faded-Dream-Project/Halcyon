@@ -80,9 +80,19 @@ bool hal_mesh_bind_armature(hal_mesh *mesh, const hal_armature *arm);
 
 /* Applies the armature's pose to the mesh's verts (writes the posed
  * positions into `out`, count == mesh->vert_count). Objects with no
- * weights copy the verts unchanged. */
+ * weights copy the verts unchanged. Assumes mesh-local ==
+ * armature-local (same-space binding). */
 bool hal_mesh_apply_pose(const hal_mesh *mesh, const hal_armature *arm,
                          hal_vec3f *out);
+
+/* The space-aware form: `mesh_to_armature` maps the mesh object's
+ * local space into the armature object's local space (= A^-1 * Wm);
+ * the result is written back into MESH-local space, so the caller
+ * still renders it through the mesh object's world matrix. */
+bool hal_mesh_apply_pose_ex(const hal_mesh *mesh,
+                            const hal_armature *arm,
+                            hal_mat4f mesh_to_armature,
+                            hal_vec3f *out);
 
 /* ---- IK ---- */
 

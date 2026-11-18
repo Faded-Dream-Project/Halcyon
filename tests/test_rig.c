@@ -7,9 +7,11 @@
 #include "core/mesh.h"
 #include "core/project.h"
 #include "core/scene.h"
+#include "io/io.h"
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -100,15 +102,22 @@ static void test_skinning(void) {
     for (size_t v = 0; v < m->vert_count; v++)
         HAL_TEST_CHECK(hal_vec3f_distance(out[v], m->verts[v]) < 1e-5);
 
-    /* Posing the parent moves verts (the plane rides the chain). */
-    arm->bones[0].pose = hal_quatf_from_axis_angle(
+    /* Posing the parent moves verts (the plane rides the chain).
+     * REGRESSION (found by the glTF skin round trip): with only bone
+     * 0 posed, every vertex maps through posed_0 regardless of
+     * weights (posed_1 * rest_1^-1 == posed_0 when pose_1 is
+     * identity), and the REST matrices must stay unposed — so the
+     * result is EXACTLY R90 * p for a same-space binding. The old
+     * rest-pose leaked the posed parent rotation into the binds. */
+    hal_quatf q90 = hal_quatf_from_axis_angle(
         hal_vec3f_axis_z(), 90.0f * HAL_DEG2RAD_f32);
+    arm->bones[0].pose = q90;
     HAL_TEST_CHECK(hal_mesh_apply_pose(m, arm, out));
-    bool moved = false;
-    for (size_t v = 0; v < m->vert_count; v++)
-        if (hal_vec3f_distance(out[v], m->verts[v]) > 0.1f)
-            moved = true;
-    HAL_TEST_CHECK(moved);
+    for (size_t v = 0; v < m->vert_count; v++) {
+        hal_vec3f want =
+            hal_quatf_rotate_vec3(q90, m->verts[v]);
+        HAL_TEST_CHECK(hal_vec3f_distance(out[v], want) < 1e-4);
+    }
 
     /* A far-away mesh with weights still sums to a valid position
      * (no NaNs). */
@@ -188,11 +197,206 @@ static void test_project_armature_round_trip(void) {
     hal_scene_destroy(s);
 }
 
+/* The glTF skin round trip: a rigged mesh at a DIFFERENT transform
+ * than its armature (the hard case), a bone-rotation clip, export,
+ * import, and a numeric pose-equivalence check — the world-space
+ * skinned vertices must match between the original and the imported
+ * scene, which proves the exported G * IBM skinning semantics equal
+ * Halcyon's in-app math. */
+static void test_gltf_skin_round_trip(void) {
+    hal_scene *s = hal_scene_create("SkinRT");
+    hal_object_id arm_id =
+        hal_scene_object_add(s, "Rig", HAL_OBJECT_ARMATURE);
+    hal_object_set_location(s, arm_id, hal_vec3f_make(1.0f, 0.0f, 0.0f));
+    hal_armature *arm = chain2();
+    hal_object_set_armature(s, arm_id, arm);
+
+    hal_object_id mesh_id =
+        hal_scene_object_add(s, "Limb", HAL_OBJECT_MESH);
+    hal_object_set_location(s, mesh_id,
+                            hal_vec3f_make(0.5f, 0.2f, 0.0f));
+    hal_mesh *mesh = hal_mesh_cube(0.5f);
+    hal_mesh_bind_armature(mesh, arm);
+    hal_object_set_mesh(s, mesh_id, mesh);
+    hal_object_set_skin(s, mesh_id, arm_id);
+
+    /* A bone-rotation clip: 0 -> 90 degrees about Z over 1 s. */
+    int ci = hal_scene_clip_add(s, "Wave");
+    hal_clip *clip = hal_scene_clip(s, ci);
+    hal_quatf q90 = hal_quatf_from_axis_angle(
+        hal_vec3f_axis_z(), 90.0f * HAL_DEG2RAD_f32);
+    hal_clip_key_rot(clip, arm_id, 0, 0.0f, hal_quatf_identity(),
+                     HAL_INTERP_LINEAR);
+    hal_clip_key_rot(clip, arm_id, 0, 1.0f, q90, HAL_INTERP_LINEAR);
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/skin.glb", tmp_dir());
+    char err[256] = { 0 };
+    HAL_TEST_CHECK_EQ_I(hal_io_gltf_export(s, path, err, sizeof(err)),
+                        HAL_OK);
+
+    /* Structural: the JSON carries the skin machinery. */
+    FILE *f = fopen(path, "rb");
+    HAL_TEST_CHECK(f != NULL);
+    if (f) {
+        hal_u32 jlen, jtype;
+        fseek(f, 12, SEEK_SET);
+        HAL_TEST_CHECK(fread(&jlen, 4, 1, f) == 1);
+        HAL_TEST_CHECK(fread(&jtype, 4, 1, f) == 1);
+        char *json = malloc(jlen + 1);
+        HAL_TEST_CHECK(json != NULL);
+        if (json) {
+            HAL_TEST_CHECK(fread(json, 1, jlen, f) == jlen);
+            json[jlen] = 0;
+            HAL_TEST_CHECK(strstr(json, "\"skins\"") != NULL);
+            HAL_TEST_CHECK(strstr(json, "\"joints\"") != NULL);
+            HAL_TEST_CHECK(strstr(json, "\"inverseBindMatrices\"") !=
+                           NULL);
+            HAL_TEST_CHECK(strstr(json, "\"JOINTS_0\"") != NULL);
+            HAL_TEST_CHECK(strstr(json, "\"WEIGHTS_0\"") != NULL);
+            HAL_TEST_CHECK(strstr(json, "\"skeleton\"") != NULL);
+            HAL_TEST_CHECK(strstr(json, "\"path\":\"rotation\"") !=
+                           NULL);
+        }
+        free(json);
+        fclose(f);
+    }
+
+    /* Import. */
+    hal_scene *loaded = NULL;
+    HAL_TEST_CHECK_EQ_I(
+        hal_io_gltf_import(path, &loaded, err, sizeof(err)), HAL_OK);
+    HAL_TEST_CHECK(loaded != NULL);
+    if (loaded) {
+        /* The armature and the mesh both came back. */
+        hal_object *lo_arm = NULL, *lo_mesh = NULL;
+        for (size_t i = 0; i < hal_scene_object_count(loaded); i++) {
+            hal_object *o = hal_scene_object_at(loaded, i);
+            if (o->armature)
+                lo_arm = o;
+            if (o->mesh && o->skin_armature != HAL_OBJECT_ID_NONE)
+                lo_mesh = o;
+        }
+        HAL_TEST_CHECK(lo_arm != NULL);
+        HAL_TEST_CHECK(lo_mesh != NULL);
+        if (lo_arm && lo_mesh && lo_arm->armature) {
+            HAL_TEST_CHECK_EQ_I(lo_arm->armature->count, 2);
+            /* Bones import with ARMATURE-LOCAL heads and the
+             * armature object carries A (location 1,0,0). */
+            HAL_TEST_CHECK_EQ_F(lo_arm->location.x, 1.0f, 1e-4);
+            HAL_TEST_CHECK_EQ_F(lo_arm->armature->bones[0].head.x,
+                                0.0f, 1e-4);
+            HAL_TEST_CHECK_EQ_F(lo_arm->armature->bones[1].head.x,
+                                0.0f, 1e-4);
+            HAL_TEST_CHECK_EQ_F(lo_arm->armature->bones[1].head.y,
+                                1.0f, 1e-4);
+            HAL_TEST_CHECK(lo_mesh->mesh->skin_weights != NULL);
+            HAL_TEST_CHECK(lo_mesh->skin_armature == lo_arm->id);
+
+            /* THE equivalence check: same bone pose on both, world
+             * skinned vertices must agree. */
+            hal_quatf pose = hal_quatf_from_axis_angle(
+                hal_vec3f_axis_z(), 60.0f * HAL_DEG2RAD_f32);
+            arm->bones[0].pose = pose;
+            lo_arm->armature->bones[0].pose = pose;
+
+            /* The exported mesh duplicates verts per corner (36 for
+             * the flat-shaded cube), so compare SETS: every imported
+             * corner's world position must match some original
+             * vert's world position, and vice versa. */
+            hal_vec3f *out_orig = malloc(mesh->vert_count *
+                                         sizeof(hal_vec3f));
+            hal_vec3f *out_load = malloc(lo_mesh->mesh->vert_count *
+                                         sizeof(hal_vec3f));
+            HAL_TEST_CHECK(out_orig && out_load);
+            hal_mat4f m2a_orig = hal_mat4f_mul(
+                hal_mat4f_invert(
+                    hal_object_world_matrix(s,
+                                            hal_scene_object(s, arm_id))),
+                hal_object_world_matrix(s,
+                                        hal_scene_object(s, mesh_id)));
+            HAL_TEST_CHECK(hal_mesh_apply_pose_ex(mesh, arm, m2a_orig,
+                                                  out_orig));
+            /* Imported: the armature object carries A, so
+             * mesh->armature is A'^-1 * Wm' as in the original. */
+            hal_mat4f m2a_load = hal_mat4f_mul(
+                hal_mat4f_invert(
+                    hal_object_world_matrix(loaded, lo_arm)),
+                hal_object_world_matrix(loaded, lo_mesh));
+            HAL_TEST_CHECK(hal_mesh_apply_pose_ex(
+                lo_mesh->mesh, lo_arm->armature, m2a_load, out_load));
+
+            hal_mat4f wm_orig =
+                hal_object_world_matrix(s, hal_scene_object(s, mesh_id));
+            hal_mat4f wm_load =
+                hal_object_world_matrix(loaded, lo_mesh);
+            if (out_orig && out_load) {
+                /* Original -> imported (every original vert appears
+                 * among the corners). */
+                for (size_t v = 0; v < mesh->vert_count; v++) {
+                    hal_vec3f w1 = hal_mat4f_transform_point(
+                        wm_orig, out_orig[v]);
+                    bool found = false;
+                    for (size_t c = 0;
+                         c < lo_mesh->mesh->vert_count && !found; c++) {
+                        hal_vec3f w2 = hal_mat4f_transform_point(
+                            wm_load, out_load[c]);
+                        if (hal_vec3f_distance(w1, w2) < 1e-4)
+                            found = true;
+                    }
+                    if (!found) {
+                        HAL_TEST_CHECK(false);
+                        break;
+                    }
+                }
+                /* Imported -> original. */
+                for (size_t c = 0; c < lo_mesh->mesh->vert_count; c++) {
+                    hal_vec3f w2 = hal_mat4f_transform_point(
+                        wm_load, out_load[c]);
+                    bool found = false;
+                    for (size_t v = 0;
+                         v < mesh->vert_count && !found; v++) {
+                        hal_vec3f w1 = hal_mat4f_transform_point(
+                            wm_orig, out_orig[v]);
+                        if (hal_vec3f_distance(w1, w2) < 1e-4)
+                            found = true;
+                    }
+                    if (!found) {
+                        HAL_TEST_CHECK(false);
+                        break;
+                    }
+                }
+            }
+            free(out_orig);
+            free(out_load);
+
+            /* The clip survived: sampling it at t = 1 poses the
+             * imported bone at 90 degrees. */
+            HAL_TEST_CHECK_EQ_I(hal_scene_clip_count(loaded), 1);
+            hal_clip *lclip = hal_scene_clip(loaded, 0);
+            HAL_TEST_CHECK(lclip != NULL);
+            if (lclip) {
+                hal_clip_sample(lclip, loaded, 1.0f);
+                hal_bone_pose lp[2];
+                hal_armature_pose(lo_arm->armature, lp);
+                /* 90 degrees about Z swings the imported stub tail
+                 * (length 0.1) off +Y: head (0,0,0) + R90*(0,0.1,0)
+                 * = (-0.1, 0, 0). */
+                HAL_TEST_CHECK_EQ_F(lp[0].tail.x, -0.1f, 1e-2);
+                HAL_TEST_CHECK_EQ_F(lp[0].tail.y, 0.0f, 1e-3);
+            }
+        }
+        hal_scene_destroy(loaded);
+    }
+    hal_scene_destroy(s);
+}
+
 int main(void) {
     test_pose_chain();
     test_auto_weights();
     test_skinning();
     test_ik();
     test_project_armature_round_trip();
+    test_gltf_skin_round_trip();
     HAL_TEST_SUMMARY("test_rig");
 }

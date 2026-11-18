@@ -77,15 +77,16 @@ static void pose_build(const hal_armature *arm, hal_bone_pose *out,
         hal_mat4f parent_m =
             b->parent >= 0 ? out[b->parent].matrix
                            : hal_mat4f_identity();
-        hal_quatf parent_rot = chain_rotation(
-            arm, out, b->parent); /* rest chain below uses POSED
-                                   * parent's accumulated rotation */
-        (void)apply_pose;
-
         p->head = hal_mat4f_transform_point(parent_m, b->head);
         hal_vec3f rest_dir = hal_vec3f_sub(b->tail, b->head);
-        hal_quatf local = apply_pose ? b->pose : hal_quatf_identity();
-        hal_quatf total = hal_quatf_mul(parent_rot, local);
+        /* The REST pose ignores bone rotations entirely (bind
+         * matrices must be the unposed chain); the POSED chain
+         * composes the ancestors' pose quats with the local one. */
+        hal_quatf total =
+            apply_pose
+                ? hal_quatf_mul(chain_rotation(arm, out, b->parent),
+                                b->pose)
+                : hal_quatf_identity();
         hal_vec3f dir = hal_quatf_rotate_vec3(total, rest_dir);
         p->tail = hal_vec3f_add(p->head, dir);
 
@@ -181,8 +182,10 @@ bool hal_mesh_bind_armature(hal_mesh *mesh, const hal_armature *arm) {
     return true;
 }
 
-bool hal_mesh_apply_pose(const hal_mesh *mesh, const hal_armature *arm,
-                         hal_vec3f *out) {
+bool hal_mesh_apply_pose_ex(const hal_mesh *mesh,
+                            const hal_armature *arm,
+                            hal_mat4f mesh_to_armature,
+                            hal_vec3f *out) {
     if (!mesh || !out)
         return false;
     if (!arm || !mesh->skin_weights || !mesh->skin_bones ||
@@ -205,8 +208,11 @@ bool hal_mesh_apply_pose(const hal_mesh *mesh, const hal_armature *arm,
     hal_armature_rest_pose(arm, rest);
     for (size_t k = 0; k < arm->count; k++)
         bind[k] = hal_mat4f_invert(rest[k].matrix);
+    hal_mat4f back = hal_mat4f_invert(mesh_to_armature);
 
     for (size_t v = 0; v < mesh->vert_count; v++) {
+        hal_vec3f p_arm = hal_mat4f_transform_point(
+            mesh_to_armature, mesh->verts[v]);
         hal_vec3f acc = hal_vec3f_zero();
         hal_f32 wsum = 0.0f;
         for (size_t i = 0; i < 4; i++) {
@@ -214,23 +220,33 @@ bool hal_mesh_apply_pose(const hal_mesh *mesh, const hal_armature *arm,
             hal_f32 wt = mesh->skin_weights[v * 4 + i];
             if (bi < 0 || bi >= (hal_i32)arm->count || wt <= 0.0f)
                 continue;
-            hal_vec3f bound = hal_mat4f_transform_point(
-                bind[bi], mesh->verts[v]);
+            hal_vec3f bound =
+                hal_mat4f_transform_point(bind[bi], p_arm);
             acc = hal_vec3f_add(
                 acc,
-                hal_vec3f_mul(hal_mat4f_transform_point(
-                                  posed[bi].matrix, bound),
-                              wt));
+                hal_vec3f_mul(
+                    hal_mat4f_transform_point(posed[bi].matrix, bound),
+                    wt));
             wsum += wt;
         }
-        out[v] = wsum > 1e-6f ? hal_vec3f_mul(acc, 1.0f / wsum)
-                              : mesh->verts[v];
+        if (wsum > 1e-6f)
+            acc = hal_vec3f_mul(acc, 1.0f / wsum);
+        else
+            acc = p_arm;
+        out[v] = hal_mat4f_transform_point(back, acc);
     }
 
     free(posed);
     free(rest);
     free(bind);
     return true;
+}
+
+bool hal_mesh_apply_pose(const hal_mesh *mesh, const hal_armature *arm,
+                         hal_vec3f *out) {
+    /* Same-space binding: the mesh and armature share their local
+     * space (the common bind setup; the render path uses _ex). */
+    return hal_mesh_apply_pose_ex(mesh, arm, hal_mat4f_identity(), out);
 }
 
 /* ---- IK (analytic 2-bone) ---- */

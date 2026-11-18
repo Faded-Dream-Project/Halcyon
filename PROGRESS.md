@@ -44,16 +44,16 @@
 
 ## Current state
 
-**M0–M8 + M10 complete; M9 PARTIAL** (2026-11-18, second session).
-M10 = preview rendering (framed PNG render, turntable frames,
-thumbnails, Render menu). M9 delivered: origin tools (Origin to BBox
-Center with world-compensating undoable shift, Origin to World
-Origin) and batch glTF export (one .glb per mesh object). M9 NOT
-delivered: asset presets, LOD/decimation, collision-shape export,
-units/axis (Y-up/Z-up) export options. Earlier open items: manual
-weight painting, glTF SKIN export, curve editor widget. Next session:
-finish M9 (presets, LODs, collision shapes, axis options), then M11
-polish.
+Session 3 (2026-11-18): item 1 of the release plan DONE — glTF SKIN
+export AND import with a numeric pose-equivalence round-trip test
+(rigged mesh at a different transform than its armature; world-space
+skinned vertices match original vs imported within 1e-4, proving the
+G*IBM semantics equal Halcyon's in-app skinning). Space-aware
+skinning (hal_mesh_apply_pose_ex) fixed a pre-existing bug where mesh
+and armature at different transforms skinned wrong. NEXT: item 2
+(viewport texture sampling: perspective-correct UVs, nearest +
+bilinear), then item 3 (M9 remainder: presets, LODs, collision
+shapes, units/axis export).
 
 ### Implemented and tested
 
@@ -373,6 +373,43 @@ polish.
   Y-up/Z-up export settings. These are the next session's first
   tasks.
 
+### Implemented and tested — glTF skins, export + import (session 3)
+
+- Export: bones as joint NODES under the armature object's node
+  (local = T(armature-space head) * R(pose); children chains), skins
+  with joints + skeleton, inverseBindMatrices = rest^-1 * A^-1 * Wm
+  (A = armature world, Wm = mesh world — at rest the glTF sum
+  collapses to Wm * v exactly), JOINTS_0 (UBYTE VEC4, bone index into
+  the joints array) and renormalized WEIGHTS_0 (FLOAT VEC4) on
+  skinned primitives (per-corner duplication forced for skins), and
+  bone-rotation animation channels targeting joint nodes (baked 30
+  fps LINEAR like all Halcyon animation export).
+- Import: skins rebuild armatures (bones with armature-LOCAL heads
+  from joint local translations, +Y stub tails — glTF joints carry
+  no tails; the armature object's TRS recovered from the root joint's
+  parent-chain world), JOINTS_0/WEIGHTS_0 reattach to the mesh
+  objects, and joint rotation animations import as HAL_CH_BONE
+  channels (raw LINEAR keys). The file's IBMs are not consulted —
+  Halcyon derives binds from the rebuilt rest pose (exact for
+  Halcyon exports, approximate for foreign files whose joints carry
+  rest rotations — documented).
+- Space-aware skinning: hal_mesh_apply_pose_ex(mesh, arm,
+  A^-1*Wm, out) — the renderer uses it, fixing the silent assumption
+  that a bound mesh shares its armature's transform.
+- Round-trip test (test_rig): structural JSON checks (skins, joints,
+  IBMs, JOINTS_0/WEIGHTS_0, skeleton, rotation path), imported
+  armature/mesh/weights/clip verification, and the numeric
+  world-space pose equivalence with a 60-degree posed bone.
+- Bugs found and fixed (each with a regression or strengthened
+  test): the M7-era REST POSE leaked posed parent rotations into
+  bind matrices (skin results were wrong whenever a parent bone was
+  posed; the old test only checked "moved" — now exact values);
+  sampler bufferViews missed the IBM/image view offsets (clip keys
+  read garbage); read_accessor rejected VEC4; "skin" sat on the
+  primitive instead of the node; a missing comma after the object
+  nodes; JOINTS_0/WEIGHTS_0 missing from the primitive attributes;
+  the root-joint search required parent < 0.
+
 ### Known issues (honest, carried forward)
 
 - Extrude/inset operate per face (adjacent selected faces extrude
@@ -426,6 +463,11 @@ polish.
 
 ## Log
 
+- **2026-11-18 — session 3, item 1: glTF skins.** Skin export (joint
+  nodes, IBMs, JOINTS_0/WEIGHTS_0, bone animation) + import with a
+  numeric pose-equivalence round trip; space-aware skinning fixed a
+  pre-existing bind bug; the M7 rest-pose leak fixed with an exact
+  regression. 2015 headless checks total.
 - **2026-11-18 — M10 complete, M9 partial (second session).**
   Preview renders (PNG/turntable/thumbnail, framing, image decode in
   the platform wrapper); origin tools and batch glTF export. M9's

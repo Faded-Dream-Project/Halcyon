@@ -6,6 +6,20 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — glTF skins: export and import (2026-11-18, session 3)
+
+- Skinned meshes export as full glTF skins: joint node hierarchies,
+  inverse bind matrices (rest^-1 * A^-1 * Wm), JOINTS_0/WEIGHTS_0
+  with per-corner duplication, skeleton references, and baked
+  bone-rotation animation on the joint nodes.
+- Skin import rebuilds armatures and reattaches weights; joint
+  rotation animations import as bone channels. Halcyon-exported
+  rigged+animated characters round trip with world-space skinned
+  vertices matching within 1e-4 (numeric pose-equivalence test).
+- Fixed (with regressions): the M7 rest pose leaked posed parent
+  rotations into bind matrices; skinning now handles meshes at a
+  different transform than their armature (hal_mesh_apply_pose_ex).
+
 ### Added — M10 + M9 partial (2026-11-18)
 
 - Preview rendering: framed lit PNG renders, turntable frame
