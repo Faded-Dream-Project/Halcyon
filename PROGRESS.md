@@ -44,7 +44,9 @@
 
 ## Current state
 
-**M0, M1 and M2 complete** (2026-11-18). Milestones M3–M11: not started.
+**M0, M1, M2 and M3 complete** (2026-11-18). Milestones M4–M11: not
+started (the founding session ended at the M3/M4 boundary; everything
+below is the honest record of where to resume).
 
 ### Implemented and tested
 
@@ -164,13 +166,63 @@
   pixel-wise (menubar/sidebar/viewport regions, grid lines, placeholder
   text ink).
 
+### Implemented and tested — M3: 3D viewport (2026-11-18)
+
+- **Mesh data structure** (`src/core/mesh.h/c`): vertices, edges,
+  polygon faces as loop runs — the shape M4's modeling tools need.
+  Newell face normals, area-weighted smooth normals, bounds + bounding
+  radius, all cache-invalidated on mutation. Primitives: cube, UV
+  sphere, plane, cylinder, cone, torus. Scene objects own an optional
+  mesh payload (freed with the object).
+- **Camera** (`src/render/camera.h/c`): orbit/pan/zoom with pitch
+  clamping, view/projection (D-005 conventions), project + ray
+  unprojection (picking-ready), Gribb-Hartmann frustum planes with
+  sphere culling.
+- **CPU rasterizer** (`src/render/raster.h/c`): depth-buffered
+  triangles (perspective-correct attributes, NDC-z [0,1], back-face
+  culling, scissored to the canvas region + clip stack),
+  depth-interpolated Bresenham lines, points. The depth buffer is
+  reused across frames.
+- **Viewport renderer** (`src/render/render.h/c`): 1 m horizon grid
+  (near-plane clipped lines), objects with flat headlight shading or
+  wireframe (near-clipped edges), homogeneous near-plane polygon
+  clipping, per-object frustum culling, and the axis gizmo overlay.
+  Renders into the editor shell's viewport rect; camera controls wired
+  (MMB/Alt+LMB orbit, Shift+MMB pan, wheel zoom); a Wire toggle rides
+  the tool rail.
+- Tests: test_mesh (88 checks) and test_viewport (62 checks — camera
+  orbit/eye/project/ray round trips, culling, raster depth ordering,
+  back-face culling, depth-range line rejection, scene render with
+  cull-on/off). The display-tier smoke test paints the full editor
+  with the live viewport; the frame verified pixel-wise (background,
+  grid, lit geometry).
+- **Bugs the tests caught** (all fixed): a face-offset array growth
+  off-by-one (heap overflow, ASan), a clip buffer sized for its input
+  rather than its output (stack overflow, ASan), a stale-binary smoke
+  run, sphere face-count arithmetic in a test.
+
+### Known issues (honest, carried into M4)
+
+- The sphere primitive's face winding is inconsistent: flat shading
+  renders correctly but some smooth (per-vertex) normals point inward.
+  First M4 task: fix primitive windings and pin smooth normals ==
+  radial in the tests.
+- Far-plane frustum culling is extracted but not verified by a test
+  (near/side culling is); add the [0,1]-NDC far-plane check in M4.
+- The live viewport's cube placement within the frame was verified
+  only by region sampling, not exact-position assertions; tighten with
+  a golden-frame test when M4 adds object picking.
+
 ### Not implemented (honest list)
 
-- Everything M3–M11: the 3D viewport (M3 — the reserved rect shows a
-  placeholder grid), modeling (meshes are not yet representable in the
-  project file — format version 1 has objects and transforms only),
-  materials/UVs, rigging, animation, import/export, game-asset
+- Everything M4–M11: mesh modeling (edit mode, extrude/inset/bevel/
+  loop cut/subdivide/merge/mirror; meshes are not yet representable in
+  the project file — format version 1 has objects and transforms
+  only), materials/UVs, rigging, animation, import/export, game-asset
   workflow, preview rendering, preferences/example projects.
+- A GPU renderer behind the hal_renderer seam (the CPU rasterizer is
+  the only implementation; FDK-REQUESTS.md R-001 tracks the GL
+  surface question).
 - Widget gaps (honest): no scrolling containers (long outliners clip),
   no multi-line text editor, no tooltips, no DPI-change re-layout
   while running (re-layout happens on resize events), no IME
@@ -191,6 +243,11 @@
 
 ## Log
 
+- **2026-11-18 — M3 complete.** Mesh data structure + six primitives,
+  orbit camera with ray/frustum math, depth-buffered CPU rasterizer,
+  the viewport renderer (grid, solid/wireframe, gizmo) wired into the
+  shell with camera controls. 735 headless checks total (150 new).
+  Tests caught two memory-safety bugs before they could ship.
 - **2026-11-18 — M2 complete.** Halcyon's own UI toolkit: painter,
   themes, widgets, layout, input routing, the editor shell wiring the
   M1 core (scene outliner, undoable property editing, project

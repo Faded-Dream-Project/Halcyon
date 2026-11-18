@@ -36,8 +36,10 @@ hal_scene *hal_scene_create(const char *name) {
 void hal_scene_destroy(hal_scene *scene) {
     if (!scene)
         return;
-    for (size_t i = 0; i < scene->count; i++)
+    for (size_t i = 0; i < scene->count; i++) {
+        hal_mesh_destroy(scene->objects[i].mesh);
         free(scene->objects[i].name);
+    }
     free(scene->objects);
     free(scene->name);
     free(scene);
@@ -84,6 +86,7 @@ hal_object_id hal_scene_object_add(hal_scene *scene, const char *name,
     slot->id = scene->next_id++;
     slot->name = owned_name;
     slot->type = type;
+    slot->mesh = NULL;
     slot->location = hal_vec3f_zero();
     slot->rotation = hal_quatf_identity();
     slot->scale = hal_vec3f_one();
@@ -116,6 +119,7 @@ void hal_scene_object_remove(hal_scene *scene, hal_object_id id) {
         if (scene->objects[i].parent == id)
             scene->objects[i].parent = scene->objects[idx].parent;
 
+    hal_mesh_destroy(scene->objects[idx].mesh);
     free(scene->objects[idx].name);
     memmove(&scene->objects[idx], &scene->objects[idx + 1],
             (scene->count - idx - 1) * sizeof(hal_object));
@@ -158,6 +162,15 @@ void hal_object_set_name(hal_scene *scene, hal_object_id id,
         return;
     free(obj->name);
     obj->name = owned;
+}
+
+void hal_object_set_mesh(hal_scene *scene, hal_object_id id,
+                         hal_mesh *mesh) {
+    hal_object *obj = hal_scene_object(scene, id);
+    if (!obj)
+        return;
+    hal_mesh_destroy(obj->mesh);
+    obj->mesh = mesh;
 }
 
 /* ---- Parenting ---- */

@@ -15,6 +15,7 @@
 #include "core/scene.h"
 #include "core/undo.h"
 #include "platform/platform.h"
+#include "render/render.h"
 #include "ui/ui.h"
 
 #include <stdbool.h>
@@ -41,8 +42,13 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event);
  * viewport animates. */
 void hal_app_paint(hal_app *app, hal_surface *surface);
 
-/* The viewport's rect in window-logical pixels (where M3 renders). */
+/* The viewport's rect in window-logical pixels (where the 3D view
+ * renders). */
 hal_rectf hal_app_viewport_rect(const hal_app *app);
+
+/* The viewport camera (borrow; mutate through the app's controls). */
+hal_camera *hal_app_camera(hal_app *app);
+const hal_render_opts *hal_app_render_opts(const hal_app *app);
 
 /* The scene, UI, undo stack and autosave (owned by the app; borrow,
  * do not destroy). */

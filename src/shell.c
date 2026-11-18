@@ -4,7 +4,9 @@
  */
 
 #include "shell.h"
+#include "core/mesh.h"
 #include "core/project.h"
+#include "render/raster.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -43,6 +45,16 @@ struct hal_app {
     /* Entry buffers (owned here, pointed at by the entries). */
     char name_buf[64];
     char loc_buf[3][32];
+
+    /* The 3D viewport. */
+    hal_camera camera;
+    hal_raster raster;
+    hal_render_opts render_opts;
+    bool wireframe;          /* bound to the tool-rail toggle      */
+    bool viewport_drag;      /* an orbit/pan drag is active        */
+    bool drag_is_pan;        /* pan vs orbit (decided at press)    */
+    hal_pointf drag_last;
+    hal_pointf last_pointer;
 };
 
 /* ---- Undo command: an object transform edit ---- */
@@ -339,6 +351,16 @@ static void add_object(hal_app *app, const char *name, hal_object_type type,
     hal_object_id id = hal_scene_object_add(app->scene, name, type);
     if (id == HAL_OBJECT_ID_NONE)
         return;
+    if (type == HAL_OBJECT_MESH) {
+        hal_mesh *mesh = NULL;
+        if (strcmp(name, "Sphere") == 0)
+            mesh = hal_mesh_sphere(1.0f, 16, 24);
+        else if (strcmp(name, "Plane") == 0)
+            mesh = hal_mesh_plane(1.0f);
+        else
+            mesh = hal_mesh_cube(0.5f);
+        hal_object_set_mesh(app->scene, id, mesh);
+    }
     hal_object_set_location(app->scene, id, location);
     hal_scene_select_only(app->scene, id);
     app->dirty = true;
@@ -420,7 +442,18 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
         return NULL;
     }
 
+    app->camera = hal_camera_default();
+    app->render_opts = hal_render_opts_default();
+    app->raster.depth = NULL;
+    app->raster.w = 0;
+    app->raster.h = 0;
+
     build_menus(app);
+
+    /* Tool rail (left edge): shading mode for now; the M4 tools join
+     * it as real operators land. */
+    hal_widget *rail = hal_column_create(hal_ui_root(app->ui));
+    hal_toggle_create(rail, "Wire", &app->wireframe);
 
     /* Right sidebar: outliner over properties; the outliner takes the
      * leftover height (expand), properties hugs its content. */
@@ -450,6 +483,8 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
     /* Status bar. */
     app->status = hal_label_create(hal_ui_root(app->ui), "Welcome");
 
+    /* A starting cube: something to look at from the first frame. */
+    add_object(app, "Cube", HAL_OBJECT_MESH, hal_vec3f_zero());
     rebuild_outliner(app);
     refresh_properties(app);
     return app;
@@ -458,6 +493,7 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
 void hal_app_destroy(hal_app *app) {
     if (!app)
         return;
+    hal_raster_end(&app->raster);
     /* The UI dies first (entries point into app buffers). */
     hal_ui_destroy(app->ui);
     hal_autosave_destroy(app->autosave);
@@ -481,6 +517,69 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event) {
 
     if (hal_ui_handle_event(app->ui, event))
         return true;
+
+    /* Viewport camera controls: events the UI did not consume that
+     * land inside the viewport rect. MMB or Alt+LMB orbits,
+     * Shift+MMB pans, the wheel zooms. */
+    hal_rectf vp = hal_app_viewport_rect(app);
+    bool in_vp = false;
+    hal_f32 px = 0.0f, py = 0.0f;
+    if (event->type == HAL_EVENT_POINTER_BUTTON_DOWN ||
+        event->type == HAL_EVENT_POINTER_BUTTON_UP ||
+        event->type == HAL_EVENT_POINTER_MOTION ||
+        event->type == HAL_EVENT_POINTER_SCROLL) {
+        if (event->type == HAL_EVENT_POINTER_SCROLL) {
+            px = event->scroll.position.x;
+            py = event->scroll.position.y;
+        } else if (event->type == HAL_EVENT_POINTER_MOTION) {
+            px = event->pointer.position.x;
+            py = event->pointer.position.y;
+        } else {
+            px = event->pointer_button.position.x;
+            py = event->pointer_button.position.y;
+        }
+        app->last_pointer = (hal_pointf){ px, py };
+        in_vp = px >= vp.x && py >= vp.y &&
+                px < vp.x + vp.width && py < vp.y + vp.height;
+    }
+
+    if (event->type == HAL_EVENT_POINTER_BUTTON_DOWN && in_vp) {
+        hal_u32 mods = event->pointer_button.modifiers;
+        bool orbit = event->pointer_button.button == HAL_BUTTON_MIDDLE ||
+                     (event->pointer_button.button == HAL_BUTTON_LEFT &&
+                      (mods & HAL_MOD_ALT) != 0);
+        bool pan = event->pointer_button.button == HAL_BUTTON_MIDDLE &&
+                   (mods & HAL_MOD_SHIFT) != 0;
+        if (orbit || pan) {
+            app->viewport_drag = true;
+            app->drag_is_pan = pan;
+            app->drag_last = (hal_pointf){ px, py };
+            return true;
+        }
+    }
+    if (event->type == HAL_EVENT_POINTER_BUTTON_UP && app->viewport_drag) {
+        app->viewport_drag = false;
+        return true;
+    }
+    if (event->type == HAL_EVENT_POINTER_MOTION && app->viewport_drag) {
+        hal_f32 dx = px - app->drag_last.x;
+        hal_f32 dy = py - app->drag_last.y;
+        app->drag_last = (hal_pointf){ px, py };
+        if (app->drag_is_pan) {
+            /* Screen-space pan scaled by the distance: content moves
+             * about with the pointer at any zoom level. */
+            hal_f32 k = app->camera.distance * 0.0016f;
+            hal_camera_pan(&app->camera, dx * k, -dy * k);
+        } else {
+            hal_camera_orbit(&app->camera, dx * 0.008f, dy * 0.008f);
+        }
+        return true;
+    }
+    if (event->type == HAL_EVENT_POINTER_SCROLL && in_vp) {
+        hal_f32 f = event->scroll.delta_y > 0.0f ? 1.1f : 0.9f;
+        hal_camera_zoom(&app->camera, f);
+        return true;
+    }
 
     /* App-level keys (the UI did not consume them). */
     if (event->type == HAL_EVENT_KEY_DOWN) {
@@ -571,29 +670,20 @@ hal_rectf hal_app_viewport_rect(const hal_app *app) {
                         h - mbar.height - SHELL_STATUSBAR_H };
 }
 
-static void paint_viewport_placeholder(hal_app *app, hal_canvas *canvas) {
+static void paint_viewport(hal_app *app, hal_canvas *canvas) {
     const hal_theme *t = hal_ui_theme(app->ui);
     hal_rectf vp = hal_app_viewport_rect(app);
-    hal_canvas_fill_rect(canvas, vp, t->colors[HAL_THEME_VIEWPORT_BG]);
-    hal_color grid = t->colors[HAL_THEME_VIEWPORT_GRID];
 
-    /* A calm horizon grid — the M3 rasterizer replaces this. */
-    hal_f32 step = 40.0f;
-    for (hal_f32 x = vp.x + step; x < vp.x + vp.width; x += step)
-        hal_canvas_draw_line(canvas, x, vp.y, x, vp.y + vp.height, grid);
-    for (hal_f32 y = vp.y + step; y < vp.y + vp.height; y += step)
-        hal_canvas_draw_line(canvas, vp.x, y, vp.x + vp.width, y, grid);
+    /* Theme-driven render options; the wireframe toggle rides along. */
+    hal_render_opts opts = app->render_opts;
+    opts.bg = t->colors[HAL_THEME_VIEWPORT_BG];
+    opts.grid = t->colors[HAL_THEME_VIEWPORT_GRID];
+    opts.object = hal_color_rgb8(0xb9, 0xb2, 0xe0);
+    opts.shading = app->wireframe ? HAL_SHADING_WIREFRAME
+                                  : HAL_SHADING_SOLID;
 
-    hal_font *font = hal_ui_font(app->ui, t->font_size);
-    if (font) {
-        const char *msg = "3D viewport arrives in M3";
-        hal_f32 tw = hal_canvas_measure_text(canvas, font, msg,
-                                             strlen(msg));
-        hal_f32 cx = vp.x + (vp.width - tw) * 0.5f;
-        hal_f32 cy = vp.y + vp.height * 0.5f;
-        hal_canvas_draw_text(canvas, font, msg, strlen(msg), cx, cy,
-                             t->colors[HAL_THEME_TEXT_DIM]);
-    }
+    hal_render_view(&app->raster, app->scene, &app->camera, canvas, vp,
+                    &opts);
 }
 
 void hal_app_paint(hal_app *app, hal_surface *surface) {
@@ -615,9 +705,8 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
 
     hal_ui_paint(app->ui, &canvas);
 
-    /* The viewport area paints over the root (the UI's empty middle).
-     * M3 replaces the placeholder with the real rasterizer. */
-    paint_viewport_placeholder(app, &canvas);
+    /* The 3D view renders into its rect over the UI's empty middle. */
+    paint_viewport(app, &canvas);
 
     hal_surface_invalidate_all(surface);
     hal_surface_present(surface);
@@ -627,6 +716,14 @@ void hal_app_paint(hal_app *app, hal_surface *surface) {
 
 hal_scene *hal_app_scene(hal_app *app) {
     return app ? app->scene : NULL;
+}
+
+hal_camera *hal_app_camera(hal_app *app) {
+    return app ? &app->camera : NULL;
+}
+
+const hal_render_opts *hal_app_render_opts(const hal_app *app) {
+    return app ? &app->render_opts : NULL;
 }
 
 hal_ui *hal_app_ui(hal_app *app) {

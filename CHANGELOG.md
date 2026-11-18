@@ -6,6 +6,19 @@ PROGRESS.md carries the honest ledger of what is NOT done yet.
 
 ## [Unreleased]
 
+### Added — M3: 3D viewport (2026-11-18)
+
+- Mesh structure (verts/edges/polygon faces) + cube, sphere, plane,
+  cylinder, cone, torus primitives; Newell + smooth normals; bounds.
+- Orbit/pan/zoom camera with projection, ray unprojection and
+  frustum-sphere culling.
+- CPU rasterizer: depth-tested triangles (perspective-correct),
+  depth-interpolated lines, near-plane clipping, scissoring.
+- Viewport renderer: horizon grid, headlight solid shading, wireframe
+  mode, axis gizmo; wired into the editor with MMB/Alt+LMB orbit,
+  Shift+MMB pan, wheel zoom, and a Wire toggle.
+- Tests: test_mesh (88 checks), test_viewport (62 checks).
+
 ### Added — M2: own UI system (2026-11-18)
 
 - Own 2D painter (canvas): AA rounded rects, lines, circles,

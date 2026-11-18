@@ -18,6 +18,7 @@
 
 #include "../platform/types.h"
 #include "math.h"
+#include "mesh.h"
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -40,6 +41,7 @@ typedef struct hal_object {
     hal_object_id id;
     char *name;              /* owned; never NULL                     */
     hal_object_type type;
+    hal_mesh *mesh;          /* owned payload; NULL unless MESH       */
 
     /* Local transform (the glTF TRS triple). */
     hal_vec3f location;
@@ -94,6 +96,11 @@ hal_object *hal_scene_object_at(hal_scene *scene, size_t index);
 /* Sets an object's name (copied; NULL or empty = "Object"). */
 void hal_object_set_name(hal_scene *scene, hal_object_id id,
                          const char *name);
+
+/* Attaches a mesh to a MESH object (the object takes ownership; the
+ * previous mesh, if any, is destroyed). NULL detaches. */
+void hal_object_set_mesh(hal_scene *scene, hal_object_id id,
+                         hal_mesh *mesh);
 
 /* ---- Parenting ----
  * The parent must exist (or be HAL_OBJECT_ID_NONE). Reparenting to a
