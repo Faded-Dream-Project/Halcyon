@@ -29,6 +29,7 @@
 #ifndef HAL_PLATFORM_H
 #define HAL_PLATFORM_H
 
+#include <stddef.h>
 #include "types.h"
 
 /* Opaque handles, declared early so the header orders by concept
@@ -266,6 +267,30 @@ typedef void (*hal_event_fn)(hal_window *window, const hal_event *event,
 void hal_window_set_event_callback(hal_window *window,
                                    hal_event_fn callback, void *user_data);
 
+/* ---- GPU frame wiring (the GPU-only window) ----
+ * The callback runs with the window's GL context current, from
+ * FDK's present arbitration, right before the swap: render the 3D
+ * scene and composite the UI texture (the window's UI surface
+ * pixels) as the LAST pass. It must not swap (FDK owns the
+ * present) and must not call FDK rendering APIs. */
+typedef void (*hal_gpu_frame_fn)(hal_window *window, void *user_data);
+void hal_window_set_gpu_frame_callback(hal_window *window,
+                                       hal_gpu_frame_fn callback,
+                                       void *user_data);
+
+/* True once the platform delivered a close request. */
+bool hal_window_close_requested(const hal_window *window);
+
+/* (Re)create the offscreen UI surface at the window's size; called
+ * on configure events and resizes. */
+void hal_window_reflow_ui(hal_window *window);
+
+/* The startup GL verdict + identity (for --gpu-info and honest
+ * failure reports). */
+const char *hal_platform_gl_reason_text(const hal_platform *platform);
+const char *hal_platform_gl_info_text(const hal_platform *platform,
+                                      char *buf, size_t n);
+
 /* ---- Surfaces ----
  * A surface is a CPU drawing target: XRGB8888 pixels (R<<16 | G<<8 | B,
  * top byte ignored), top-left origin. Window surfaces present to the
@@ -294,6 +319,12 @@ hal_result hal_surface_present(hal_surface *surface);
 /* Frame pacing: false right after a present under a compositor that
  * paces frames; the frame loop skips drawing until it returns true. */
 bool hal_surface_frame_ready(hal_surface *surface);
+
+/* Same, but ARGB8888 with straight alpha (the GPU window's UI
+ * layer: the viewport hole composites transparent). */
+hal_result hal_surface_offscreen_create_argb(hal_i32 width,
+                                             hal_i32 height,
+                                             hal_surface **out_surface);
 
 /* Damage declaration for raw pixel writes — REQUIRED after painting
  * through hal_surface_info.pixels, or present will not send the frame. */

@@ -123,19 +123,23 @@ static inline void blend_pixel(hal_canvas *canvas, hal_i32 x, hal_i32 y,
     hal_u32 *px = &canvas->pixels[(size_t)y * (size_t)canvas->stride +
                                   (size_t)x];
     if (alpha >= 255u && color.a >= 1.0f) {
-        *px = ((hal_u32)(color.r * 255.0f + 0.5f) << 16) |
+        *px = 0xFF000000u |
+              ((hal_u32)(color.r * 255.0f + 0.5f) << 16) |
               ((hal_u32)(color.g * 255.0f + 0.5f) << 8) |
               (hal_u32)(color.b * 255.0f + 0.5f);
         return;
     }
 
     /* Straight source-over with the color's alpha folded into the
-     * coverage: one effective alpha, one blend. */
+     * coverage: one effective alpha, one blend. On ARGB surfaces the
+     * alpha channel composites with the same coverage (the GPU
+     * window's UI layer draws over the transparent viewport hole). */
     hal_f32 eff = (hal_f32)alpha / 255.0f * color.a;
     if (eff <= 0.0f)
         return;
     if (eff >= 1.0f) {
-        *px = ((hal_u32)(color.r * 255.0f + 0.5f) << 16) |
+        *px = 0xFF000000u |
+              ((hal_u32)(color.r * 255.0f + 0.5f) << 16) |
               ((hal_u32)(color.g * 255.0f + 0.5f) << 8) |
               (hal_u32)(color.b * 255.0f + 0.5f);
         return;
@@ -145,7 +149,11 @@ static inline void blend_pixel(hal_canvas *canvas, hal_i32 x, hal_i32 y,
     hal_f32 dr = (hal_f32)((dst >> 16) & 0xFFu);
     hal_f32 dg = (hal_f32)((dst >> 8) & 0xFFu);
     hal_f32 db = (hal_f32)(dst & 0xFFu);
-    *px = ((hal_u32)(color.r * 255.0f * eff + dr * (1.0f - eff) + 0.5f)
+    hal_f32 da = (hal_f32)((dst >> 24) & 0xFFu);
+    hal_u32 out_a =
+        (hal_u32)(255.0f * eff + da * (1.0f - eff) + 0.5f);
+    *px = (out_a << 24) |
+          ((hal_u32)(color.r * 255.0f * eff + dr * (1.0f - eff) + 0.5f)
            << 16) |
           ((hal_u32)(color.g * 255.0f * eff + dg * (1.0f - eff) + 0.5f)
            << 8) |
@@ -172,7 +180,8 @@ void hal_canvas_fill_rect(hal_canvas *canvas, hal_rectf rect,
     if (x1 <= x0 || y1 <= y0)
         return;
 
-    hal_u32 packed = ((hal_u32)(color.r * 255.0f + 0.5f) << 16) |
+    hal_u32 packed = 0xFF000000u |
+                     ((hal_u32)(color.r * 255.0f + 0.5f) << 16) |
                      ((hal_u32)(color.g * 255.0f + 0.5f) << 8) |
                      (hal_u32)(color.b * 255.0f + 0.5f);
 

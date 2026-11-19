@@ -30,6 +30,11 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
 done
 
 status=0
+# The sandbox GL is llvmpipe (software): FDK's lane policy refuses it
+# without FDK_GL_FORCE=1 (honest by design). Real hardware does not
+# need the override.
+export FDK_GL_FORCE=1
+
 DISPLAY=":$disp" LSAN_OPTIONS="suppressions=$SUPP" "$APP" --smoke \
     || status=$?
 

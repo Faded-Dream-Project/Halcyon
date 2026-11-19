@@ -158,6 +158,8 @@ struct hal_ui {
 
     bool needs_paint;
     hal_f32 scale;         /* the scale layout measured with         */
+    bool has_hole;         /* the GPU viewport hole: the root fill   */
+    hal_rectf hole;        /* skips it (transparent in the UI layer) */
     hal_pointf last_pointer; /* window-logical, from motion events   */
 
     /* Font cache: logical px -> font loaded at px * scale. */

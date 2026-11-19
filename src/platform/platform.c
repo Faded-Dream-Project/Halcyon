@@ -1,39 +1,89 @@
 /*
- * platform.c — the FDK implementation of Halcyon's platform layer
+ * platform.c — Halcyon's platform layer.
  *
- * The ONLY translation unit in Halcyon that includes FDK headers (see
- * platform.h's contract). Everything here is a mechanical value
- * translation: FDK types in, Halcyon types out, never the reverse.
+ * GPU-ONLY WINDOW (the 2026-11-19 session): Halcyon's editor window
+ * is an FDK EXTENSION SURFACE (fdk_extend.h) on an FDK_RENDER_GPU
+ * context, with the GL frame callback owning the whole buffer —
+ * FDK's app-owned GL API (fdk_gl.h's family). Why not the
+ * fdk_gl_viewport widget: on FDK 7fbba8a/X11 the widget's GL content
+ * is composited UNDER the CPU frame (pixel-proven — the lane's
+ * present draws a fullscreen CPU quad over the region; see
+ * docs/FDK-REQUESTS.md R-003), while the ext-surface frame callback
+ * path pixel-verified end to end (shaders, VBO/IBO, readback,
+ * server-visible output). The frame model stays application-driven:
+ * Halcyon presents only when something changed.
  *
- * If the platform is ever swapped, this file (and only this file) is
- * rewritten against the new backend; docs/FDK-REQUESTS.md records what
- * Halcyon needs that FDK does not yet expose.
+ * Frame flow per presented frame: hal_surface_present(ui_surface)
+ * [the shell paints the UI into the offscreen UI surface first]
+ * -> fdk_surface_present(ext render target)
+ * -> FDK's present arbitration (src/platform/x11/x11_surface.c:
+ *    "the add-on's GL frame callback owns this window's buffer")
+ * -> make_current(app core context) + Halcyon's render callback
+ *    (3D scene with the GL 3.3 core renderer, then the UI texture
+ *    composited LAST — menus and popups over the viewport by
+ *    construction) + FDK swaps.
+ *
+ * KNOWN FDK 7fbba8a QUIRKS this file absorbs (recorded in
+ * docs/FDK-REQUESTS.md):
+ *  - The ext GL frame callback is DECLARED as
+ *    void (*)(fdk_ext_surface*, void*) but INVOKED as fn(user,
+ *    surface) — swapped. hal_gpu_frame_trampoline matches the REAL
+ *    invocation order.
+ *  - The lane engages lazily: one ordinary fill+present through the
+ *    render target must precede fdk_ext_gl_set_frame_callback
+ *    (examples/22_ext_complete.c's documented dance), and the
+ *    connection's lane loads at the first GPU-mode fdk_window —
+ *    hal_platform_init engages through a hidden probe window (which
+ *    also reads fdk_gl_status / fdk_window_gl_info for --gpu-info
+ *    and the honest startup refusal).
  */
-
 #include "platform.h"
+#include "gl_loader.h"
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
 
 #include "fdk/fdk.h"
+#include "fdk/fdk_extend.h"
+#include "fdk/fdk_gl.h"
 
 /* ---- Internal structs ---- */
 
 struct hal_platform {
     fdk_context *fdk;
+    fdk_window *probe;      /* hidden; engages + reports the lane */
+    fdk_ext_surface_kind *kind;
+    int gl_reason;          /* FDK_GL_REASON_* of the probe engage */
+    fdk_gl_info gl_info;    /* flavor/version/vendor/renderer */
+    char gl_reason_text[160];
 };
 
 struct hal_window {
     hal_platform *platform;
-    fdk_window *fdk;
-    hal_surface *surface;   /* lazily created, owned by the window */
+    fdk_ext_surface *ext;
+    fdk_surface *target;    /* the ext render target (present trig) */
+    hal_surface *ui;        /* offscreen; the shell paints HERE */
     hal_event_fn callback;
     void *callback_user;
+    hal_gpu_frame_fn gpu_frame;
+    void *gpu_frame_user;
+    hal_size size;
+    hal_f32 scale;
+    char title[128];
+    unsigned long xid;      /* X11 window (0 on Wayland) */
+    bool shown;
+    bool close_requested;
 };
 
 struct hal_surface {
     fdk_surface *fdk;
-    bool window_owned;      /* true: belongs to a hal_window        */
+    bool window_owned;      /* true: belongs to a hal_window */
+    hal_window *ui_owner;   /* set: presenting routes to the GPU
+                             * frame (the UI layer of that window) */
 };
 
 struct hal_font {
@@ -44,49 +94,35 @@ struct hal_font {
 
 static hal_result hal_result_from_fdk(fdk_result r) {
     /* Explicit mapping, not numeric coincidence: if FDK grows a code
-     * Halcyon does not know, it degrades to HAL_ERR_UNKNOWN and the
-     * log says the original. */
+     * Halcyon has not named, the default branch fails loudly in the
+     * tests rather than aliasing a meaning. */
     switch (r) {
-    case FDK_OK:                     return HAL_OK;
-    case FDK_ERR_INVALID_ARGUMENT:   return HAL_ERR_INVALID_ARGUMENT;
-    case FDK_ERR_OUT_OF_MEMORY:      return HAL_ERR_OUT_OF_MEMORY;
-    case FDK_ERR_NOT_INITIALIZED:    return HAL_ERR_NOT_INITIALIZED;
-    case FDK_ERR_UNSUPPORTED:        return HAL_ERR_UNSUPPORTED;
-    case FDK_ERR_NOT_FOUND:          return HAL_ERR_NOT_FOUND;
-    case FDK_ERR_LIMIT:              return HAL_ERR_LIMIT;
-    case FDK_ERR_INVALID_STATE:      return HAL_ERR_INVALID_STATE;
-    case FDK_ERR_PLATFORM_INIT:      return HAL_ERR_PLATFORM_INIT;
-    case FDK_ERR_NO_DISPLAY:         return HAL_ERR_NO_DISPLAY;
-    case FDK_ERR_WINDOW_CREATE:      return HAL_ERR_WINDOW_CREATE;
-    case FDK_ERR_PLATFORM:           return HAL_ERR_PLATFORM;
-    case FDK_ERR_SURFACE_CREATE:     return HAL_ERR_SURFACE_CREATE;
-    case FDK_ERR_IO:                 return HAL_ERR_IO;
-    case FDK_ERR_NOT_A_FILE:         return HAL_ERR_NOT_FOUND;
-    case FDK_ERR_FONT_LOAD:          return HAL_ERR_FONT_LOAD;
-    default:                         return HAL_ERR_UNKNOWN;
+    case FDK_OK: return HAL_OK;
+    case FDK_ERR_INVALID_ARGUMENT: return HAL_ERR_INVALID_ARGUMENT;
+    case FDK_ERR_OUT_OF_MEMORY: return HAL_ERR_OUT_OF_MEMORY;
+    case FDK_ERR_NOT_INITIALIZED: return HAL_ERR_PLATFORM_INIT;
+    case FDK_ERR_PLATFORM_INIT: return HAL_ERR_PLATFORM_INIT;
+    case FDK_ERR_NO_DISPLAY: return HAL_ERR_NO_DISPLAY;
+    case FDK_ERR_WINDOW_CREATE: return HAL_ERR_WINDOW_CREATE;
+    case FDK_ERR_UNSUPPORTED: return HAL_ERR_UNSUPPORTED;
+    default: return HAL_ERR_PLATFORM;
     }
 }
 
 static fdk_color hal_color_to_fdk(hal_color c) {
-    fdk_color out = { c.r, c.g, c.b, c.a };
-    return out;
+    return (fdk_color){ c.r, c.g, c.b, c.a };
 }
 
 static fdk_rect hal_rect_to_fdk(hal_rect r) {
-    fdk_rect out = { r.x, r.y, r.width, r.height };
-    return out;
+    return (fdk_rect){ r.x, r.y, r.width, r.height };
 }
 
 static hal_rect hal_rect_from_fdk(fdk_rect r) {
-    return hal_rect_make(r.x, r.y, r.width, r.height);
+    return (hal_rect){ r.x, r.y, r.width, r.height };
 }
 
-
-/* ---- Event translation ---- */
-
-static void hal_translate_event(fdk_window *fdk_win,
-                                const fdk_event_data *event,
-                                void *user_data);
+/* ---- Events (fdk_event_data -> hal_event; the ext surface's stream
+ * carries the same shapes a plain window's does) ---- */
 
 static void hal_dispatch(hal_window *win, const hal_event *event) {
     if (win->callback)
@@ -100,10 +136,10 @@ static void hal_translate_key(const fdk_key_event *fk, hal_key_event *hk) {
     hk->is_repeat = fk->is_repeat;
 }
 
-static void hal_translate_event(fdk_window *fdk_win,
+static void hal_translate_event(fdk_ext_surface *ext,
                                 const fdk_event_data *event,
                                 void *user_data) {
-    (void)fdk_win;
+    (void)ext;
     hal_window *win = user_data;
     if (!win)
         return;
@@ -116,9 +152,12 @@ static void hal_translate_event(fdk_window *fdk_win,
         ev.type = HAL_EVENT_WINDOW_CONFIGURE;
         ev.configure.size.width = event->configure.size.width;
         ev.configure.size.height = event->configure.size.height;
+        win->size = ev.configure.size;
+        hal_window_reflow_ui(win);
         break;
     case FDK_EVENT_WINDOW_CLOSE_REQUEST:
         ev.type = HAL_EVENT_WINDOW_CLOSE_REQUEST;
+        win->close_requested = true;
         break;
     case FDK_EVENT_WINDOW_FOCUS:
         ev.type = HAL_EVENT_WINDOW_FOCUS;
@@ -190,7 +229,104 @@ static void hal_translate_event(fdk_window *fdk_win,
     hal_dispatch(win, &ev);
 }
 
+/* ---- The ext-surface kind (Halcyon's own native window) ---- */
+
+static fdk_result hal_kind_create(fdk_ext_surface *surface,
+                                  fdk_ext_native_handle *out_native,
+                                  void *user) {
+    (void)user;
+    fdk_context *ctx = fdk_ext_surface_context(surface);
+    if (fdk_ext_active_backend(ctx) == FDK_EXT_BACKEND_X11) {
+        fdk_ext_native_display disp;
+        if (fdk_ext_get_native_display(ctx, &disp) != FDK_OK)
+            return FDK_ERR_UNSUPPORTED;
+        Display *dpy = (Display *)disp.display;
+        int screen = DefaultScreen(dpy);
+        Window root = RootWindow(dpy, screen);
+        XSetWindowAttributes attrs;
+        memset(&attrs, 0, sizeof(attrs));
+        attrs.event_mask = ExposureMask | StructureNotifyMask;
+        attrs.background_pixel = BlackPixel(dpy, screen);
+        Window w = XCreateWindow(dpy, root, 0, 0, 1280, 800, 0,
+                                 CopyFromParent, InputOutput, CopyFromParent,
+                                 CWEventMask | CWBackPixel, &attrs);
+        if (!w)
+            return FDK_ERR_WINDOW_CREATE;
+        XStoreName(dpy, w, "Halcyon");
+        static char res_name[] = "halcyon";
+        static char res_class[] = "Halcyon";
+        XClassHint ch;
+        memset(&ch, 0, sizeof(ch));
+        ch.res_name = res_name;
+        ch.res_class = res_class;
+        XSetClassHint(dpy, w, &ch);
+        XSizeHints sh;
+        memset(&sh, 0, sizeof(sh));
+        sh.flags = PBaseSize | PMinSize;
+        sh.min_width = 640;
+        sh.min_height = 480;
+        sh.base_width = 1280;
+        sh.base_height = 800;
+        XSetWMNormalHints(dpy, w, &sh);
+        out_native->backend = FDK_EXT_BACKEND_X11;
+        out_native->xid = (fdk_u64)w;
+        return FDK_OK;
+    }
+    /* Wayland: the kind would build a wl_surface + xdg_toplevel role
+     * through the documented native accessors (fdk_extend.h:285-353
+     * sketches the pattern; examples/19_extension_surfaces.c carries
+     * the reference shape). Not built in this sandbox (no Wayland
+     * compositor, FDK built X11-only) — refused HONESTLY rather than
+     * shipped untested. Tracked in docs/FDK-REQUESTS.md R-004. */
+    fprintf(stderr,
+            "halcyon-platform: the Wayland backend is not enabled in "
+            "this build (no compositor to verify it against); run "
+            "under X11\n");
+    return FDK_ERR_UNSUPPORTED;
+}
+
+/* The GL frame callback trampoline. FDK 7fbba8a invokes the
+ * registered callback as fn(user, surface) although the public
+ * typedef declares (fdk_ext_surface*, void*) — the documented
+ * signature and the invocation disagree (FDK-REQUESTS R-002). Match
+ * the REAL order; swap back when FDK fixes it. */
+static void hal_gpu_frame_trampoline(void *user, void *surface) {
+    (void)surface;
+    hal_window *win = user;
+    if (win && win->gpu_frame)
+        win->gpu_frame(win, win->gpu_frame_user);
+}
+
 /* ---- Lifecycle ---- */
+
+static const char *gl_reason_name(int reason) {
+    switch (reason) {
+    case FDK_GL_REASON_OK: return "OK";
+    case FDK_GL_REASON_NOT_YET: return "NOT_YET";
+    case FDK_GL_REASON_SIZE_GATE: return "SIZE_GATE";
+    case FDK_GL_REASON_CPU_MODE: return "CPU_MODE";
+    case FDK_GL_REASON_DRIVER: return "DRIVER";
+    case FDK_GL_REASON_BACKEND: return "BACKEND";
+    case FDK_GL_REASON_DOWNGRADED: return "DOWNGRADED";
+    default: return "?";
+    }
+}
+
+const char *hal_platform_gl_reason_text(const hal_platform *p) {
+    if (!p)
+        return "<no platform>";
+    return p->gl_reason_text;
+}
+
+const char *hal_platform_gl_info_text(const hal_platform *p,
+                                      char *buf, size_t n) {
+    if (!p || !buf || n == 0)
+        return buf ? buf : "";
+    snprintf(buf, n, "GL %s %d.%d — %s / %s", p->gl_info.flavor,
+             p->gl_info.version_major, p->gl_info.version_minor,
+             p->gl_info.vendor, p->gl_info.renderer);
+    return buf;
+}
 
 hal_result hal_platform_init(const hal_platform_options *options,
                              hal_platform **out_platform) {
@@ -206,11 +342,65 @@ hal_result hal_platform_init(const hal_platform_options *options,
     fdk_opts.app_id = options && options->app_id
                           ? options->app_id
                           : "org.faded-dream.halcyon";
+    /* GPU-ONLY: the classic framebuffer present path is disabled for
+     * the context's windows; a refused GL stack fails window creation
+     * instead of silently falling back (fdk_core.h:53-79). */
+    fdk_opts.render_mode = FDK_RENDER_GPU;
 
     fdk_result r = fdk_init(&p->fdk, &fdk_opts);
     if (!fdk_ok(r)) {
         free(p);
         return hal_result_from_fdk(r);
+    }
+
+    /* Engage the lane through a hidden probe window BEFORE anything
+     * else: the connection's GL lane loads at the first GPU-mode
+     * window, and the probe's fdk_gl_status / fdk_window_gl_info are
+     * the honest startup verdict + the --gpu-info identity. */
+    fdk_window_options po;
+    memset(&po, 0, sizeof(po));
+    po.title = "halcyon-gl-probe";
+    po.width = 64;
+    po.height = 64;
+    fdk_window *probe = NULL;
+    r = fdk_window_create(p->fdk, &po, &probe);
+    if (!fdk_ok(r)) {
+        snprintf(p->gl_reason_text, sizeof(p->gl_reason_text),
+                 "fdk_window_create (GPU mode) refused: %d — the GL "
+                 "stack could not initialize (see the FDK log lines "
+                 "above)",
+                 (int)r);
+        fprintf(stderr, "halcyon-gpu: %s\n", p->gl_reason_text);
+        fdk_shutdown(p->fdk);
+        free(p);
+        return HAL_ERR_PLATFORM_INIT;
+    }
+    p->probe = probe;
+    (void)fdk_window_gl_engage(probe);
+    fdk_gl_status_data st;
+    memset(&st, 0, sizeof(st));
+    (void)fdk_gl_status(probe, &st);
+    p->gl_reason = (int)st.reason;
+    {
+        fdk_gl_info gi;
+        memset(&gi, 0, sizeof(gi));
+        (void)fdk_window_gl_info(probe, &gi);
+        p->gl_info = gi; /* struct copy; strings are lane-owned */
+    }
+    snprintf(p->gl_reason_text, sizeof(p->gl_reason_text),
+             "fdk_gl_status: %s (pixel_area %lld, size_gate %lld, "
+             "force %d, cpu_mode %d)",
+             gl_reason_name(p->gl_reason),
+             (long long)st.pixel_area, (long long)st.size_gate,
+             st.force_override, st.cpu_mode);
+    if (p->gl_reason != FDK_GL_REASON_OK) {
+        fprintf(stderr,
+                "halcyon-gpu: the GL viewport cannot engage — %s. "
+                "Halcyon is GPU-only (no CPU fallback); exiting.\n",
+                p->gl_reason_text);
+        fdk_shutdown(p->fdk);
+        free(p);
+        return HAL_ERR_PLATFORM_INIT;
     }
 
     *out_platform = p;
@@ -220,6 +410,12 @@ hal_result hal_platform_init(const hal_platform_options *options,
 void hal_platform_shutdown(hal_platform *platform) {
     if (!platform)
         return;
+    if (platform->kind) {
+        fdk_ext_kind_destroy(platform->kind);
+        platform->kind = NULL;
+    }
+    if (platform->probe)
+        fdk_window_destroy(platform->probe);
     fdk_shutdown(platform->fdk);
     free(platform);
 }
@@ -233,7 +429,32 @@ int hal_platform_pump(hal_platform *platform, int timeout_ms) {
     return n;
 }
 
-/* ---- Windows ---- */
+/* ---- Windows (ext surfaces) ---- */
+
+/* (Re)create the offscreen UI layer at the window's size: an
+ * ARGB8888 surface — the viewport hole stays transparent (alpha 0)
+ * so the GL scene shows through the composite; panels and overlays
+ * paint alpha 255. */
+void hal_window_reflow_ui(hal_window *window) {
+    if (!window || window->size.width <= 0 || window->size.height <= 0)
+        return;
+    hal_i32 w = window->size.width;
+    hal_i32 h = window->size.height;
+    if (window->ui && window->ui->fdk) {
+        fdk_surface_info info;
+        memset(&info, 0, sizeof(info));
+        if (fdk_ok(fdk_surface_get_info(window->ui->fdk, &info)) &&
+            (hal_i32)info.width == w && (hal_i32)info.height == h)
+            return; /* unchanged */
+        hal_surface_destroy(window->ui);
+        window->ui = NULL;
+    }
+    hal_surface *ui = NULL;
+    if (!hal_ok(hal_surface_offscreen_create_argb(w, h, &ui)))
+        return;
+    ui->ui_owner = window;
+    window->ui = ui;
+}
 
 hal_result hal_window_create(hal_platform *platform,
                              const hal_window_options *options,
@@ -241,75 +462,151 @@ hal_result hal_window_create(hal_platform *platform,
     if (!platform || !out_window)
         return HAL_ERR_INVALID_ARGUMENT;
 
+    if (!hal_gl_load()) {
+        fprintf(stderr,
+                "halcyon-gpu: the GL function loader failed — the "
+                "GPU-only viewport cannot run. Exiting.\n");
+        return HAL_ERR_UNSUPPORTED;
+    }
+
+    if (!platform->kind) {
+        fdk_ext_surface_ops ops;
+        memset(&ops, 0, sizeof(ops));
+        ops.struct_size = sizeof(ops);
+        ops.create = hal_kind_create;
+        if (!fdk_ok(fdk_ext_register_kind(platform->fdk, "halcyon-editor",
+                                          &ops, NULL, &platform->kind))) {
+            fprintf(stderr,
+                    "halcyon-gpu: fdk_ext_register_kind failed\n");
+            return HAL_ERR_WINDOW_CREATE;
+        }
+    }
+
     hal_window *win = calloc(1, sizeof(*win));
     if (!win)
         return HAL_ERR_OUT_OF_MEMORY;
+    win->platform = platform;
+    win->size.width = options && options->width > 0 ? options->width : 1280;
+    win->size.height = options && options->height > 0 ? options->height : 800;
+    snprintf(win->title, sizeof(win->title), "%s",
+             options && options->title ? options->title : "Halcyon");
+    win->scale = 1.0f; /* X11: no scale concept (fdk docs); Wayland
+                        * reads the live buffer scale — R-004. */
 
-    fdk_window_options fdk_opts;
-    memset(&fdk_opts, 0, sizeof(fdk_opts));
-    fdk_opts.title = options && options->title ? options->title : "Halcyon";
-    fdk_opts.width = options && options->width > 0 ? options->width : 1280;
-    fdk_opts.height = options && options->height > 0 ? options->height : 800;
-
-    fdk_result r = fdk_window_create(platform->fdk, &fdk_opts, &win->fdk);
+    fdk_result r = fdk_ext_surface_create(platform->kind, &win->ext);
     if (!fdk_ok(r)) {
         free(win);
         return hal_result_from_fdk(r);
     }
+    fdk_ext_surface_set_event_callback(win->ext, hal_translate_event, win);
 
-    win->platform = platform;
-    fdk_window_set_event_callback(win->fdk, hal_translate_event, win);
+    if (!fdk_ok(fdk_ext_surface_get_surface(win->ext, &win->target)) ||
+        !win->target) {
+        fdk_ext_surface_destroy(win->ext);
+        free(win);
+        return HAL_ERR_WINDOW_CREATE;
+    }
+
+    /* The engagement dance (examples/22_ext_complete.c): one ordinary
+     * fill+present makes the lane serve THIS window, after which the
+     * GL frame callback can be installed. */
+    (void)fdk_surface_fill(win->target,
+                           (fdk_color){ 0.063f, 0.078f, 0.18f, 1.0f });
+    r = fdk_surface_present(win->target);
+    if (!fdk_ok(r)) {
+        fprintf(stderr,
+                "halcyon-gpu: the first present failed (%d) — the GL "
+                "lane refused this window: %s. Halcyon is GPU-only; "
+                "exiting.\n",
+                (int)r, platform->gl_reason_text);
+        fdk_ext_surface_destroy(win->ext);
+        free(win);
+        return hal_result_from_fdk(r);
+    }
+
+    r = fdk_ext_gl_set_frame_callback(
+        win->ext, (fdk_ext_gl_frame_fn)hal_gpu_frame_trampoline, win);
+    if (!fdk_ok(r)) {
+        fprintf(stderr,
+                "halcyon-gpu: fdk_ext_gl_set_frame_callback refused "
+                "(%d) — %s. Halcyon is GPU-only; exiting.\n",
+                (int)r, platform->gl_reason_text);
+        fdk_ext_surface_destroy(win->ext);
+        free(win);
+        return hal_result_from_fdk(r);
+    }
+
+    hal_window_reflow_ui(win);
+    if (!win->ui) {
+        fdk_ext_surface_destroy(win->ext);
+        free(win);
+        return HAL_ERR_OUT_OF_MEMORY;
+    }
 
     *out_window = win;
     return HAL_OK;
 }
 
 void hal_window_show(hal_window *window) {
-    if (window)
-        fdk_window_show(window->fdk);
+    if (!window)
+        return;
+    fdk_ext_surface_show(window->ext);
+    window->shown = true;
 }
 
 void hal_window_destroy(hal_window *window) {
     if (!window)
         return;
-    /* The surface dies with the FDK window's own surface; drop the
-     * wrapper without destroying the FDK object it borrows. */
-    if (window->surface)
-        free(window->surface);
-    fdk_window_destroy(window->fdk);
+    if (window->ui)
+        hal_surface_destroy(window->ui);
+    fdk_ext_surface_destroy(window->ext);
     free(window);
 }
 
 void hal_window_set_title(hal_window *window, const char *title) {
-    if (window)
-        fdk_window_set_title(window->fdk, title);
+    if (!window || !title)
+        return;
+    snprintf(window->title, sizeof(window->title), "%s", title);
+    if (window->xid) {
+        fdk_ext_native_display disp;
+        if (fdk_ok(fdk_ext_get_native_display(window->platform->fdk,
+                                              &disp)) &&
+            disp.backend == FDK_EXT_BACKEND_X11)
+            XStoreName((Display *)disp.display,
+                       (unsigned long)window->xid, window->title);
+    }
 }
 
 void hal_window_resize(hal_window *window, hal_i32 width, hal_i32 height) {
-    if (window && width > 0 && height > 0)
-        fdk_window_resize(window->fdk, width, height);
+    if (!window || width <= 0 || height <= 0)
+        return;
+    if (window->xid) {
+        fdk_ext_native_display disp;
+        if (fdk_ok(fdk_ext_get_native_display(window->platform->fdk,
+                                              &disp)) &&
+            disp.backend == FDK_EXT_BACKEND_X11) {
+            Display *dpy = (Display *)disp.display;
+            XResizeWindow(dpy, (unsigned long)window->xid,
+                          (unsigned)width, (unsigned)height);
+            XFlush(dpy);
+        }
+    }
+    window->size.width = width;
+    window->size.height = height;
+    hal_window_reflow_ui(window);
 }
 
 hal_result hal_window_get_size(const hal_window *window, hal_size *out_size) {
     if (!window || !out_size)
         return HAL_ERR_INVALID_ARGUMENT;
-    fdk_size s;
-    fdk_result r = fdk_window_get_size(window->fdk, &s);
-    if (!fdk_ok(r))
-        return hal_result_from_fdk(r);
-    out_size->width = s.width;
-    out_size->height = s.height;
+    *out_size = window->size;
     return HAL_OK;
 }
 
 hal_result hal_window_get_scale(const hal_window *window, hal_f32 *out_scale) {
     if (!window || !out_scale)
         return HAL_ERR_INVALID_ARGUMENT;
-    fdk_f32 scale = 1.0f;
-    fdk_result r = fdk_window_get_scale(window->fdk, &scale);
-    if (!fdk_ok(r))
-        return hal_result_from_fdk(r);
-    *out_scale = scale;
+    *out_scale = window->scale;
     return HAL_OK;
 }
 
@@ -317,57 +614,42 @@ hal_result hal_window_get_render_backend(const hal_window *window,
                                          hal_render_backend *out) {
     if (!window || !out)
         return HAL_ERR_INVALID_ARGUMENT;
-    fdk_render_backend b = FDK_RENDER_BACKEND_CPU;
-    fdk_result r = fdk_window_get_render_backend(window->fdk, &b);
-    if (!fdk_ok(r)) {
-        *out = HAL_RENDER_BACKEND_UNKNOWN;
-        return hal_result_from_fdk(r);
-    }
-    switch (b) {
-    case FDK_RENDER_BACKEND_CPU:
-        *out = HAL_RENDER_BACKEND_CPU;
-        break;
-    case FDK_RENDER_BACKEND_VULKAN:
-        *out = HAL_RENDER_BACKEND_VULKAN;
-        break;
-    case FDK_RENDER_BACKEND_OPENGL:
-        *out = HAL_RENDER_BACKEND_OPENGL;
-        break;
-    default:
-        *out = HAL_RENDER_BACKEND_UNKNOWN;
-        break;
-    }
+    /* The GPU-only window presents through the GL frame callback on
+     * the engaged lane — OpenGL by construction (the platform
+     * refused to init otherwise). */
+    *out = HAL_RENDER_BACKEND_OPENGL;
     return HAL_OK;
 }
 
 const char *hal_window_render_device(const hal_window *window) {
-    if (!window)
+    if (!window || !window->platform)
         return "<none>";
-    const char *d = fdk_window_render_device(window->fdk);
-    return d ? d : "<none>";
+    return window->platform->gl_info.renderer[0]
+               ? window->platform->gl_info.renderer
+               : "<unknown>";
 }
 
 hal_result hal_window_get_surface(hal_window *window,
                                   hal_surface **out_surface) {
     if (!window || !out_surface)
         return HAL_ERR_INVALID_ARGUMENT;
+    /* The shell paints the UI into the offscreen surface; presenting
+     * it triggers the GPU frame (see hal_surface_present). */
+    *out_surface = window->ui;
+    return window->ui ? HAL_OK : HAL_ERR_UNSUPPORTED;
+}
 
-    if (!window->surface) {
-        fdk_surface *fdk_surf = NULL;
-        fdk_result r = fdk_window_get_surface(window->fdk, &fdk_surf);
-        if (!fdk_ok(r))
-            return hal_result_from_fdk(r);
+void hal_window_set_gpu_frame_callback(hal_window *window,
+                                       hal_gpu_frame_fn callback,
+                                       void *user_data) {
+    if (!window)
+        return;
+    window->gpu_frame = callback;
+    window->gpu_frame_user = user_data;
+}
 
-        hal_surface *surf = calloc(1, sizeof(*surf));
-        if (!surf)
-            return HAL_ERR_OUT_OF_MEMORY;
-        surf->fdk = fdk_surf;
-        surf->window_owned = true;
-        window->surface = surf;
-    }
-
-    *out_surface = window->surface;
-    return HAL_OK;
+bool hal_window_close_requested(const hal_window *window) {
+    return window ? window->close_requested : false;
 }
 
 void hal_window_set_cursor(hal_window *window, hal_cursor cursor) {
@@ -382,11 +664,12 @@ void hal_window_set_cursor(hal_window *window, hal_cursor cursor) {
     case HAL_CURSOR_GRAB:      shape = FDK_CURSOR_GRAB;      break;
     case HAL_CURSOR_GRABBING:  shape = FDK_CURSOR_GRABBING;  break;
     }
-    fdk_window_set_cursor(window->fdk, shape);
+    fdk_ext_surface_set_cursor(window->ext, shape);
 }
 
 void hal_window_set_event_callback(hal_window *window,
-                                   hal_event_fn callback, void *user_data) {
+                                   hal_event_fn callback,
+                                   void *user_data) {
     if (!window)
         return;
     window->callback = callback;
@@ -413,12 +696,22 @@ hal_result hal_surface_info_get(hal_surface *surface,
 hal_result hal_surface_present(hal_surface *surface) {
     if (!surface)
         return HAL_ERR_INVALID_ARGUMENT;
+    if (surface->ui_owner) {
+        /* The UI layer of a GPU window: presenting drives the GPU
+         * frame — the ext render target's present runs the GL frame
+         * callback (which composites this surface's pixels as the
+         * LAST pass) and swaps. */
+        return hal_result_from_fdk(
+            fdk_surface_present(surface->ui_owner->target));
+    }
     return hal_result_from_fdk(fdk_surface_present(surface->fdk));
 }
 
 bool hal_surface_frame_ready(hal_surface *surface) {
     if (!surface)
         return false;
+    if (surface->ui_owner)
+        return fdk_surface_frame_ready(surface->ui_owner->target);
     return fdk_surface_frame_ready(surface->fdk);
 }
 
@@ -438,6 +731,27 @@ hal_result hal_surface_offscreen_create(hal_i32 width, hal_i32 height,
         return HAL_ERR_INVALID_ARGUMENT;
     fdk_surface *fdk_surf = NULL;
     fdk_result r = fdk_surface_create(width, height, &fdk_surf);
+    if (!fdk_ok(r))
+        return hal_result_from_fdk(r);
+    hal_surface *surf = calloc(1, sizeof(*surf));
+    if (!surf) {
+        fdk_surface_destroy(fdk_surf);
+        return HAL_ERR_OUT_OF_MEMORY;
+    }
+    surf->fdk = fdk_surf;
+    surf->window_owned = false;
+    *out_surface = surf;
+    return HAL_OK;
+}
+
+hal_result hal_surface_offscreen_create_argb(hal_i32 width,
+                                             hal_i32 height,
+                                             hal_surface **out_surface) {
+    if (!out_surface)
+        return HAL_ERR_INVALID_ARGUMENT;
+    fdk_surface *fdk_surf = NULL;
+    fdk_result r = fdk_surface_create_format(
+        width, height, FDK_SURFACE_FORMAT_ARGB8888, &fdk_surf);
     if (!fdk_ok(r))
         return hal_result_from_fdk(r);
     hal_surface *surf = calloc(1, sizeof(*surf));
@@ -482,7 +796,8 @@ hal_result hal_surface_from_image(const char *path,
     return HAL_OK;
 }
 
-hal_result hal_surface_save_png(const hal_surface *surface, const char *path) {
+hal_result hal_surface_save_png(const hal_surface *surface,
+                                const char *path) {
     if (!surface || !path)
         return HAL_ERR_INVALID_ARGUMENT;
     return hal_result_from_fdk(fdk_surface_save_png(surface->fdk, path));
@@ -634,8 +949,9 @@ hal_result hal_dialog_open_file(hal_platform *platform, const char *title,
                                 const char *filters,
                                 hal_dialog_done_fn on_done, void *user_data,
                                 hal_window *parent) {
-    return dialog_show(platform, parent ? parent->fdk : NULL, title, filters,
-                       on_done, user_data, false, NULL);
+    (void)parent; /* dialogs parent to the hidden probe window */
+    return dialog_show(platform, platform ? platform->probe : NULL, title,
+                       filters, on_done, user_data, false, NULL);
 }
 
 hal_result hal_dialog_save_file(hal_platform *platform, const char *title,
@@ -643,33 +959,21 @@ hal_result hal_dialog_save_file(hal_platform *platform, const char *title,
                                 const char *start_name,
                                 hal_dialog_done_fn on_done, void *user_data,
                                 hal_window *parent) {
-    return dialog_show(platform, parent ? parent->fdk : NULL, title, filters,
-                       on_done, user_data, true, start_name);
+    (void)parent;
+    return dialog_show(platform, platform ? platform->probe : NULL, title,
+                       filters, on_done, user_data, true, start_name);
 }
 
 hal_result hal_dialog_message(hal_platform *platform, hal_window *parent,
                               const char *title, const char *text) {
+    (void)parent;
     if (!platform)
         return HAL_ERR_INVALID_ARGUMENT;
     fdk_dialog_options opts;
     memset(&opts, 0, sizeof(opts));
     opts.title = title;
     opts.text = text;
-    opts.parent = parent ? parent->fdk : NULL;
+    opts.parent = platform->probe;
     fdk_dialog_show_message(platform->fdk, &opts, NULL, NULL, NULL);
     return HAL_OK;
-}
-
-/* ---- Clipboard ---- */
-
-hal_result hal_clipboard_set_text(hal_platform *platform, const char *text) {
-    if (!platform || !text)
-        return HAL_ERR_INVALID_ARGUMENT;
-    return hal_result_from_fdk(fdk_clipboard_set_text(platform->fdk, text));
-}
-
-char *hal_clipboard_get_text(hal_platform *platform) {
-    if (!platform)
-        return NULL;
-    return fdk_clipboard_get_text(platform->fdk);
 }

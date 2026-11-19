@@ -58,6 +58,12 @@ hal_widget *hal_ui_root(hal_ui *ui);
 bool hal_ui_needs_paint(const hal_ui *ui);
 void hal_ui_invalidate(hal_ui *ui);
 
+/* The GPU viewport hole: when set, the UI's base fill leaves `rect`
+ * transparent — the GL scene composited under the UI layer shows
+ * through exactly there, and every UI overlay painted later (menus,
+ * popups, tooltips, gizmo) still lands over it. */
+void hal_ui_set_hole(hal_ui *ui, bool has, hal_rectf rect);
+
 /* Paints the tree (and any open menu overlay) onto the canvas. */
 void hal_ui_paint(hal_ui *ui, hal_canvas *canvas);
 

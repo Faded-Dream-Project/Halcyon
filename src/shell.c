@@ -17,8 +17,8 @@
 #include "render/preview.h"
 #include "render/raster.h"
 #include "ui/theme.h"
-#include "render/raster.h"
-#include "ui/theme.h"
+#include "render/render.h"
+#include "render/gl_renderer.h"
 
 #include <math.h>
 #include <stdarg.h>
@@ -41,6 +41,9 @@ struct hal_app {
     hal_platform *platform;
     hal_window *window;
     hal_ui *ui;
+    hal_gl_renderer *glr;   /* the GPU viewport renderer        */
+    bool ui_content_dirty;  /* the UI texture needs re-upload   */
+    hal_u64 gpu_serial;     /* bumped on live scene mutations   */
     hal_scene *scene;
     hal_undo_stack *undo;
     hal_autosave *autosave;
@@ -2011,6 +2014,61 @@ static void menu_action(hal_widget *menubar, int menu, int item,
     }
 }
 
+static void hal_app_gpu_frame(hal_window *window, void *user);
+
+/* ---- The GPU frame (the platform's present arbitration calls this
+ * with the GL context current; FDK swaps when it returns) ---- */
+
+void hal_app_bump_gpu_serial(hal_app *app) {
+    if (app)
+        app->gpu_serial++;
+}
+
+static void hal_app_gpu_frame(hal_window *window, void *user) {
+    hal_app *app = user;
+    (void)window;
+    if (!app || !app->glr)
+        return;
+
+    /* The viewport region in LOGICAL units (same math the CPU path
+     * used; the renderer scales to physical). */
+    hal_rectf vp = hal_app_viewport_rect(app);
+    hal_f32 scale = 1.0f;
+    hal_window_get_scale(app->window, &scale);
+    const hal_theme *t = hal_ui_theme(app->ui);
+
+    /* The same options the CPU paint path built (the readback tests
+     * diff the two renderers). */
+    hal_render_opts opts = app->render_opts;
+    opts.textures = app->textures;
+    opts.bg = t->colors[HAL_THEME_VIEWPORT_BG];
+    opts.grid = t->colors[HAL_THEME_VIEWPORT_GRID];
+    opts.object = hal_color_rgb8(0xb9, 0xb2, 0xe0);
+    opts.shading = app->wireframe ? HAL_SHADING_WIREFRAME
+                                  : HAL_SHADING_SOLID;
+    opts.draw_gizmo = false; /* overlays ride the UI layer */
+
+hal_size ws = { 0, 0 };
+    hal_window_get_size(app->window, &ws);
+    hal_gl_render_view(app->glr, app->scene, &app->camera, vp, scale,
+                       (int)ws.width, (int)ws.height, &opts,
+                       app->gpu_serial, NULL, 0, NULL, 0);
+
+    /* The UI layer LAST: panels, then menus/popups/tooltips over the
+     * viewport — the z-order requirement by construction. */
+    hal_surface *ui = NULL;
+    if (hal_ok(hal_window_get_surface(app->window, &ui)) && ui) {
+        hal_surface_info info;
+        if (hal_ok(hal_surface_info_get(ui, &info))) {
+hal_gl_composite_ui(app->glr, info.pixels,
+                                (int)info.width, (int)info.height,
+                                (int)info.stride,
+                                app->ui_content_dirty);
+            app->ui_content_dirty = false;
+        }
+    }
+}
+
 /* ---- Lifecycle ---- */
 
 hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
@@ -2020,6 +2078,18 @@ hal_app *hal_app_create(hal_platform *platform, hal_window *window) {
     app->platform = platform;
     app->window = window;
     app->running = true;
+
+    /* GPU-only viewport: the GL frame callback renders the 3D scene
+     * and composites the UI texture as the last pass. */
+    app->glr = hal_gl_renderer_create();
+    if (!app->glr || hal_gl_renderer_stats(app->glr) == NULL) {
+        fprintf(stderr,
+                "halcyon-gpu: the GL renderer failed to initialize "
+                "(shaders) — Halcyon is GPU-only; exiting.\n");
+        hal_app_destroy(app);
+        return NULL;
+    }
+    hal_window_set_gpu_frame_callback(window, hal_app_gpu_frame, app);
 
     app->scene = hal_scene_create("Scene");
     app->undo = hal_undo_stack_create(app->scene, 128);
@@ -2127,6 +2197,10 @@ void hal_app_destroy(hal_app *app) {
     if (!app)
         return;
     hal_raster_end(&app->raster);
+    if (app->glr) {
+        hal_gl_renderer_destroy(app->glr);
+        app->glr = NULL;
+    }
     /* The UI dies first (entries point into app buffers). */
     hal_ui_destroy(app->ui);
     hal_autosave_destroy(app->autosave);
@@ -3308,7 +3382,10 @@ static void paint_timeline(hal_app *app, hal_canvas *canvas) {
 #undef TL_X
 }
 
-static void paint_viewport(hal_app *app, hal_canvas *canvas) {
+/* The CPU raster path — the reference oracle for the GL renderer's
+ * readback tests (never called at runtime; the GPU frame owns the
+ * viewport). */
+void hal_app_paint_viewport_cpu(hal_app *app, hal_canvas *canvas) {
     const hal_theme *t = hal_ui_theme(app->ui);
     hal_rectf vp = hal_app_viewport_rect(app);
 
@@ -3382,7 +3459,12 @@ static void hal_app_paint_frame(hal_app *app, hal_surface *surface,
     hal_ui_set_scale(app->ui, scale);
     layout_shell(app, logical.width, logical.height);
 
+    /* The GPU viewport hole: the 3D scene composites under the UI
+     * layer through this transparent rect. */
+    hal_ui_set_hole(app->ui, true, hal_app_viewport_rect(app));
+
     hal_ui_paint(app->ui, canvas);
+    app->ui_content_dirty = true;
 
     /* A quiet panel strip behind the status + hint lines so the
      * bottom of the window reads as one bar. AFTER the UI paint:
@@ -3418,8 +3500,9 @@ static void hal_app_paint_frame(hal_app *app, hal_surface *surface,
         }
     }
 
-    /* The 3D view renders into its rect over the UI's empty middle. */
-    paint_viewport(app, canvas);
+    /* The 3D view renders on the GPU (hal_app_gpu_frame, from the
+     * present arbitration) — the CPU rasterizer is the TEST oracle
+     * only, never on the runtime path. */
 
     /* The timeline strip (when a clip is active). */
     paint_timeline(app, canvas);
@@ -3753,12 +3836,16 @@ int hal_app_run_zorder_test(hal_app *app, hal_surface *surface) {
     const hal_theme *t = hal_ui_theme(app->ui);
     /* Theme colors as displayed bytes (the canvas packs ABGR in the
      * low 24 bits; read through the same packing). */
-    hal_u32 panel = (hal_u32)(t->colors[HAL_THEME_PANEL].b * 255.0f) |
+    /* The canvas packs alpha now (ARGB surfaces composite it):
+     * opaque theme colors carry 0xFF in the top byte. */
+    hal_u32 panel = 0xFF000000u |
+                    (hal_u32)(t->colors[HAL_THEME_PANEL].b * 255.0f) |
                     ((hal_u32)(t->colors[HAL_THEME_PANEL].g * 255.0f)
                      << 8) |
                     ((hal_u32)(t->colors[HAL_THEME_PANEL].r * 255.0f)
                      << 16);
-    hal_u32 vpbg = (hal_u32)(t->colors[HAL_THEME_VIEWPORT_BG].b *
+    hal_u32 vpbg = 0xFF000000u |
+                   (hal_u32)(t->colors[HAL_THEME_VIEWPORT_BG].b *
                              255.0f) |
                    ((hal_u32)(t->colors[HAL_THEME_VIEWPORT_BG].g *
                               255.0f)

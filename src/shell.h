@@ -27,6 +27,14 @@ extern "C" {
 typedef struct hal_app hal_app;
 
 hal_app *hal_app_create(hal_platform *platform, hal_window *window);
+
+/* Bump the GPU scene serial: live scene mutations (vertex drags,
+ * transforms, playback) re-upload mesh buffers on the next frame. */
+void hal_app_bump_gpu_serial(hal_app *app);
+
+/* The CPU raster viewport — the reference oracle for the GL
+ * renderer's readback tests. Never called at runtime. */
+void hal_app_paint_viewport_cpu(hal_app *app, hal_canvas *canvas);
 void hal_app_destroy(hal_app *app);
 
 /* True when the user asked to quit (menu, shortcut, window close). */

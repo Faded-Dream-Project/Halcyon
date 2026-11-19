@@ -68,6 +68,13 @@ void hal_ui_invalidate(hal_ui *ui) {
         ui->needs_paint = true;
 }
 
+void hal_ui_set_hole(hal_ui *ui, bool has, hal_rectf rect) {
+    if (!ui)
+        return;
+    ui->has_hole = has;
+    ui->hole = rect;
+}
+
 void hal_ui_paint(hal_ui *ui, hal_canvas *canvas) {
     if (!ui || !canvas)
         return;
@@ -75,6 +82,30 @@ void hal_ui_paint(hal_ui *ui, hal_canvas *canvas) {
     /* Every paint starts with a CLEAN clip stack (a reused canvas
      * must not inherit stale pushes from a previous pass). */
     canvas->clip_count = 0;
+
+    /* The GPU viewport hole: ERASE it to transparent each paint —
+     * overlays (menus, tooltips, gizmo) painted into the hole on a
+     * previous frame must not accumulate; the GL scene shows
+     * through the zeroed alpha. */
+    if (ui->has_hole && canvas->pixels && canvas->stride > 0) {
+        int hx0 = (int)(ui->hole.x * canvas->scale);
+        int hy0 = (int)(ui->hole.y * canvas->scale);
+        int hw = (int)(ui->hole.width * canvas->scale);
+        int hh = (int)(ui->hole.height * canvas->scale);
+        if (hx0 < 0) { hw += hx0; hx0 = 0; }
+        if (hy0 < 0) { hh += hy0; hy0 = 0; }
+        if (hx0 + hw > (int)canvas->width)
+            hw = (int)canvas->width - hx0;
+        if (hy0 + hh > (int)canvas->height)
+            hh = (int)canvas->height - hy0;
+        if (hw > 0 && hh > 0) {
+            hal_u32 *px = (hal_u32 *)canvas->pixels;
+            for (int y = hy0; y < hy0 + hh; y++)
+                memset(px + (size_t)y * (size_t)canvas->stride +
+                           (size_t)hx0, 0,
+                       (size_t)hw * sizeof(hal_u32));
+        }
+    }
 
     /* A scale change between layout and paint re-measures everything;
      * the layout scale is part of the measurement. */

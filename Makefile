@@ -43,7 +43,10 @@ CFLAGS  := $(STD) $(WARN) $(FEATURE) $(CONFIG_FLAGS)
 # FDK_LIBDIR is nonempty by construction — the FDK check above already
 # failed the build otherwise.
 FDK_LIBDIR := $(shell pkg-config --variable=libdir fdk)
-LDFLAGS := $(FDK_LIBS) -lm -Wl,-rpath,$(FDK_LIBDIR)
+# X11: the ext-surface window creation (FDK's documented add-on
+# pattern includes the native headers); GL stays dlopen-only.
+X11_LIBS := $(shell pkg-config --libs x11 2>/dev/null || echo -lX11)
+LDFLAGS := $(FDK_LIBS) $(X11_LIBS) -lm -Wl,-rpath,$(FDK_LIBDIR)
 
 # ---- Sources ----
 # src/platform is compiled with the FDK include path; every other module

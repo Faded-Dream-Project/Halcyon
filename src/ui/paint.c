@@ -271,8 +271,35 @@ void hal__paint_widget(hal_ui *ui, hal_widget *w, hal_canvas *canvas) {
 
     switch (w->kind) {
     case HAL_WIDGET_ROOT:
-        hal_canvas_fill_rect(canvas, w->abs_rect,
-                             ui->theme->colors[HAL_THEME_WINDOW]);
+        if (ui->has_hole) {
+            /* The GPU viewport: the hole stays TRANSPARENT in the UI
+             * layer so the GL scene shows through the composite;
+             * panels fill the four rects around it. */
+            const hal_rectf *h = &ui->hole;
+            hal_canvas_fill_rect(canvas,
+                                 (hal_rectf){ w->abs_rect.x, w->abs_rect.y,
+                                              w->abs_rect.width, h->y - w->abs_rect.y },
+                                 ui->theme->colors[HAL_THEME_WINDOW]);
+            hal_canvas_fill_rect(canvas,
+                                 (hal_rectf){ w->abs_rect.x, h->y + h->height,
+                                              w->abs_rect.width,
+                                              w->abs_rect.y + w->abs_rect.height -
+                                                  (h->y + h->height) },
+                                 ui->theme->colors[HAL_THEME_WINDOW]);
+            hal_canvas_fill_rect(canvas,
+                                 (hal_rectf){ w->abs_rect.x, h->y,
+                                              h->x - w->abs_rect.x, h->height },
+                                 ui->theme->colors[HAL_THEME_WINDOW]);
+            hal_canvas_fill_rect(canvas,
+                                 (hal_rectf){ h->x + h->width, h->y,
+                                              w->abs_rect.x + w->abs_rect.width -
+                                                  (h->x + h->width),
+                                              h->height },
+                                 ui->theme->colors[HAL_THEME_WINDOW]);
+        } else {
+            hal_canvas_fill_rect(canvas, w->abs_rect,
+                                 ui->theme->colors[HAL_THEME_WINDOW]);
+        }
         break;
     case HAL_WIDGET_LABEL:
         paint_label(ui, w, canvas);
