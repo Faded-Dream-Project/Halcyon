@@ -44,6 +44,57 @@
 
 ## Current state
 
+**SESSION 7 (2026-11-19) — the GPU-ONLY viewport is LIVE (pushed
+b6e11b9), the measurement tools landed; three of the newest test
+paths are honestly known-broken and blocked on the next session.**
+
+- FDK updated to 7fbba8a (fdk_gl.h's app-owned GL). README records
+  the minimum commit. The user's build failure (my d2203c7 used
+  fdk_window_get_render_backend / fdk_window_render_device, which
+  only exist in 7fbba8a+) is fixed by the requirement bump.
+- The widget path (fdk_gl_viewport) is UNUSABLE on X11 7fbba8a —
+  pixel-proven (R-003). The EXT-SURFACE GL frame callback path is
+  pixel-verified end to end and IS the shipped architecture: the
+  editor window is an FDK ext surface on an FDK_RENDER_GPU context;
+  hal_app_gpu_frame renders the 3D scene with Halcyon's own GL 3.3
+  core renderer and composites the UI texture (ARGB, viewport hole
+  alpha-0) as the LAST pass — menus/popups over the viewport by
+  construction. Server-side XGetImage verified: panels opaque, the
+  shaded cube at the viewport center through the hole.
+- Workarounds absorbed + documented: the frame callback's swapped
+  argument order (R-002), UNSIGNED_BYTE indices silently drawing
+  nothing (R-004, we use UNSIGNED_INT), GL state reset every frame
+  (the shared context), lazy GL init inside the callback (no context
+  at app-create time), the fill+present engagement dance, and the
+  canvas now packs alpha (ARGB surfaces).
+- b6e11b9 state: headless suite + the FULL display tier green on the
+  GPU window (6 ui-audits + entries + z-order UI-layer+input).
+- This session's additions (uncommitted→committed at session end):
+  --gpu-info (flavor/version/vendor/renderer + fdk_gl_status +
+  loader + MSAA + timer: verified working on llvmpipe), the F9
+  frame-time overlay (CPU frame time + GL timer query + tris +
+  MSAA), make bench (--bench N: a side x side grid, 40 frames,
+  CPU/GPU ms averages; the 100k run still crashes — use-after-free
+  in the bench's scene teardown, one fix landed but something still
+  dangles — NEXT SESSION), the GPU serial bump wiring (dirty/modal/
+  playback), and the present-failure = context-lost honest exit.
+- KNOWN-BROKEN, honestly: (1) --bench 100000 exits 1 (ASan
+  use-after-free around the scene swap in hal_app_run_bench);
+  (2) --test-gl-readback exits 7 with the reason printed (post-
+  present sampling reads the wrong buffer; the in-callback readback
+  hook is designed but not wired); (3) the z-order test's SERVER
+  side-probe is skipped (a use-after-free in its teardown interplay)
+  — the pass/fail gate is the UI-layer pixel ownership + input
+  priority, which are green. The display tier that contains these
+  still exits 2 for the same reasons; b6e11b9's tier was green.
+- Sandbox honesty: llvmpipe ONLY — correctness verification, never
+  performance. No fps numbers claimed. The 60fps/1M-tri GTX 1050 Ti
+  target is UNMEASURED anywhere yet; run `make bench-run` on real
+  hardware. docs/performance.md carries the full record.
+- Wayland: NOT built/tested (no compositor; FDK built X11-only).
+  R-005.
+
+
 **SESSION 7 (2026-11-19) — FDK updated to 7fbba8a; Halcyon builds
 and runs against it.** The user's machine failed to build commit
 d2203c7 because it calls `fdk_window_get_render_backend` /

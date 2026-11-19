@@ -281,6 +281,10 @@ void hal_window_set_gpu_frame_callback(hal_window *window,
 /* True once the platform delivered a close request. */
 bool hal_window_close_requested(const hal_window *window);
 
+/* The window's native X11 id (0 on Wayland) — server-side pixel
+ * verification in tests. */
+unsigned long hal_window_native_xid(const hal_window *window);
+
 /* (Re)create the offscreen UI surface at the window's size; called
  * on configure events and resizes. */
 void hal_window_reflow_ui(hal_window *window);

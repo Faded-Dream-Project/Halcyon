@@ -122,3 +122,53 @@ raise the per-pixel cost). Requested, in preference order:
 
 Use case: viewport interactivity at 200k+ triangles with bilinear
 texturing on mid-range hardware (Intel i5-8400 class).
+
+
+---
+
+## R-002 open (2026-11-19, session 7) — ext GL frame callback invoked with swapped arguments
+
+fdk_extend.h declares `fdk_ext_gl_frame_fn` as
+`void (*)(fdk_ext_surface *surface, void *user)`, but the X11 present
+arbitination (fdk_x11_window_gl_set_frame_cb stores fn+user; cb_flush
+calls `fn(user, surface)`) invokes it as fn(user, surface) — the
+documented parameter order is swapped at the call site. Halcyon's
+trampoline (src/platform/platform.c, hal_gpu_frame_trampoline) matches
+the REAL order; swap back when FDK fixes the invocation. Proof: a
+callback compiled to the declared order saw its counter stay 0 across
+200 invocations while the swap-symmetric draws still ran.
+
+## R-003 open (2026-11-19, session 7) — the fdk_gl_viewport widget composites UNDER the CPU frame on X11
+
+fdk_gl.h promises the GL viewport widget's region composites in the
+tree's paint order with "menus, popups and tooltips that overlap the
+region draw OVER it". On FDK 7fbba8a/X11 the widget's GL content is
+never visible at all: the lane's present draws a fullscreen CPU quad
+(draw_fullscreen_quad) over the back buffer AFTER the tree walk ran
+the widget's render callback, and nothing excludes the widget's
+region. Pixel-proven twice (server-side XGetImage): the widget
+example's animated clear and a constant-red callback clear both
+invisible — the region shows the widget's CPU fill box (15,18,23).
+tests/test_gl_viewport.c only pins the reason enum/engage identity,
+not pixels. Halcyon therefore uses the ext-surface GL frame callback
+(present arbitration) instead, which pixel-verified end to end.
+
+## R-004 open (2026-11-19, session 7) — GL_UNSIGNED_BYTE index draws silently rasterize nothing on llvmpipe core
+
+glDrawElements(GL_TRIANGLES, n, GL_UNSIGNED_BYTE, ...) on the
+llvmpipe core 4.5 context (via the engaged lane) draws NOTHING and
+reports NO error; GL_UNSIGNED_SHORT and GL_UNSIGNED_INT work. Found
+by the session's spike (half-window triangle invisible, fullscreen
+quad fine). Halcyon's renderer uses UNSIGNED_INT everywhere; a
+spec-legal byte-index path would fail silently for other add-ons too.
+
+## R-005 open (2026-11-19, session 7) — a Wayland-backend FDK build + the GPU window's Wayland kind
+
+Halcyon's ext-surface window kind implements the X11 create path
+(XCreateWindow via the documented native display handle). The
+Wayland path (wl_compositor surface + an xdg_toplevel role through
+the add-on's own registry) is sketched in the code but REFUSED
+honestly: this sandbox has no Wayland compositor and FDK was built
+X11-only (FDK_DISABLE_WAYLAND auto). To finish it: a Wayland-enabled
+FDK build, weston/sway in the test rig, and the generated
+xdg-shell-client protocol bindings.

@@ -648,6 +648,19 @@ void hal_window_set_gpu_frame_callback(hal_window *window,
     window->gpu_frame_user = user_data;
 }
 
+/* The window's native X11 id (0 on Wayland / not yet created) —
+ * for tests that verify SERVER-side pixels with XGetImage. */
+unsigned long hal_window_native_xid(const hal_window *window) {
+    if (!window || !window->ext)
+        return 0;
+    fdk_ext_native_handle h;
+    memset(&h, 0, sizeof(h));
+    if (!fdk_ok(fdk_ext_surface_native(window->ext, &h)) ||
+        h.backend != FDK_EXT_BACKEND_X11)
+        return 0;
+    return (unsigned long)h.xid;
+}
+
 bool hal_window_close_requested(const hal_window *window) {
     return window ? window->close_requested : false;
 }

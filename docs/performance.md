@@ -1,61 +1,42 @@
-# Viewport performance
+# Halcyon performance record
 
-Measured with `make bench` (`build/bench`): a solid-shaded grid mesh
-tilted toward the camera, rendered at **1280x720 with the grid on**,
-24 runs per size, reporting wall-clock `hal_render_view` time.
-The benchmark builds with clean **-O2 objects, no sanitizers**, so
-the numbers are honest timings rather than instrumented ones.
+## What was measured, where, and how
 
-## Numbers (this development sandbox, 2026-11-18)
+The only GL environment this project's sandbox can run is Mesa
+llvmpipe (software rasterization) under Xvfb with FDK_GL_FORCE=1.
+llvmpipe executes the full GL 3.3/4.5 core pipeline in software:
+it verifies CORRECTNESS (pixels, compositing, shaders, readback)
+and NOTHING about hardware performance. No frame-time number from
+this environment is a performance claim, and none is quoted as one.
 
-| Triangles | min | median | max | ~fps (median) |
-| --------- | --: | -----: | --: | ------------- |
-| 10 000    | 5.80 ms | 5.86 ms | 7.61 ms | ~171 |
-| 50 000    | 9.36 ms | 9.62 ms | 12.54 ms | ~104 |
-| 100 000   | 13.62 ms | 13.67 ms | 14.06 ms | ~73 |
+## The tooling (all landed)
 
-The sandbox CPU is slower than the reference target (Intel i5-8400);
-expect comfortably higher frame rates there. The reference target for
-a "smooth viewport" is 60 fps — met at 100k triangles with headroom.
+- `--gpu-info`: the engaged context's flavor/version/vendor/
+  renderer (fdk_window_gl_info), the fdk_gl_status verdict, the
+  loader path (glX/egl), MSAA samples, timer-query availability.
+  Sandbox output: "GL core 4.5 — Mesa / llvmpipe (LLVM 19.1.7, 256
+  bits)", status OK, loader glX, msaa 0 (llvmpipe reports no
+  samples), timer yes.
+- `F9` in-app: the frame-time overlay — CPU frame time (the frame
+  callback, CLOCK_MONOTONIC) + the GPU timer query (GL_TIME_ELAPSED,
+  read one frame late) + triangles/frame + MSAA.
+- `make bench-run` / `--bench N`: an N-triangle grid scene, 40
+  presented frames, CPU ms + GPU ms averages. HONEST STATUS: the
+  100k run currently crashes in its own scene teardown (ASan
+  use-after-free) — the bench harness itself is next-session work;
+  no numbers exist from any machine yet.
 
-## What the time goes to
+## The target (unmeasured)
 
-The cost is dominated by pixel fill (the grid overdraws heavily at
-these sizes): edge tests, depth compare and the color write per
-pixel. Triangle counts alone matter less than covered area — the
-50k→100k step costs less than doubling because the grid cells shrink
-and many triangles fail the bbox test cheaply or cover fewer pixels.
+"60+ fps at 1M triangles on a GTX 1050 Ti (i5-8400)" is the
+requirement. The renderer is built for it (buffers uploaded once,
+per-frame work is one MVP + one indexed draw per object, MSAA via
+one blit), but NO hardware measurement has happened. Run
+`make bench-run` on the target machine and record the numbers here.
 
-## Optimizations applied (this session)
+## CPU rasterizer
 
-- **Flat-shading fast path** in `hal_raster_triangle`: when the three
-  corner intensities are equal (the default flat shading — one lambert
-  value per face), the packed color is computed once and the inner
-  loop reduces to edge stepping, a depth compare and the write.
-- **Incremental edge functions**: the barycentric edge functions are
-  affine in (x, y), so each pixel costs three adds per function
-  instead of a recomputed cross product (six multiplies).
-- Together: ~15% faster at 100k triangles, ~25% at 10k, with the
-  barycentric-binding regression test guarding correctness.
-
-## Deliberately NOT done (honest)
-
-- **Multithreading**: the numbers above are single-threaded and clear
-  the 60 fps bar with margin on the reference target; a tiled
-  rasterizer with per-tile depth buffers is the natural next step if
-  a real workload (heavy texture sampling, antialiasing) needs it.
-  Deferred to keep the rasterizer simple and debuggable.
-- **SIMD**: the edge stepping is scalar; SSE/AVX batches of 4-8
-  pixels per iteration are the same deferred work.
-- **GPU rasterization**: Halcyon's platform layer (FDK) does not
-  currently expose a GPU surface or context; the request is recorded
-  in `docs/FDK-REQUESTS.md` (GPU viewport path). Until then the CPU
-  rasterizer is the only backend.
-
-## Reproducing
-
-```sh
-source /home/z/my-project/scripts/hal-env.sh
-make bench
-./build/bench
-```
+The CPU raster path left the runtime entirely (it is the test
+oracle). Its historical numbers (editor-size scenes, headless) are
+in the git history's PROGRESS entries; it was never a 1M-triangle
+path and is not the performance surface anymore.

@@ -19,6 +19,8 @@
 
 #include "platform/platform.h"
 #include "shell.h"
+#include "render/gl_renderer.h"
+#include "platform/gl_loader.h"
 
 typedef struct app_frame {
     hal_platform *platform;
@@ -70,6 +72,8 @@ int main(int argc, char **argv) {
     bool zorder_test = false;
     bool entries_test = false;
     bool gpu_info = false;
+    long bench_target = 0;
+    bool gl_readback_test = false;
     int audit_w = 1920, audit_h = 1080;
     int win_w = 1280, win_h = 800; /* --size overrides any mode */
     hal_f32 audit_scale = 0.0f; /* 0 = the window's real scale */
@@ -87,6 +91,10 @@ int main(int argc, char **argv) {
             entries_test = true;
         } else if (strcmp(argv[i], "--gpu-info") == 0)
             gpu_info = true;
+        else if (strcmp(argv[i], "--bench") == 0 && i + 1 < argc)
+            bench_target = atol(argv[++i]);
+        else if (strcmp(argv[i], "--test-gl-readback") == 0)
+            gl_readback_test = true;
         else if (strcmp(argv[i], "--ui-audit") == 0) {
             ui_audit = true;
             if (i + 1 < argc)
@@ -156,28 +164,54 @@ int main(int argc, char **argv) {
                               hal_app_scene(frame.app), now);
         }
 
+        hal_app_gpu_frame_tick(frame.app, 0);
+
         if (frame.need_redraw || hal_ui_needs_paint(hal_app_ui(frame.app))) {
             if (hal_surface_frame_ready(frame.surface)) {
-                hal_app_paint(frame.app, frame.surface);
+                hal_result pr = hal_app_paint(frame.app, frame.surface);
+                if (pr != HAL_OK) {
+                    fprintf(stderr,
+                            "halcyon-gpu: the GPU frame present "
+                            "failed (%d): %s — the GL context was "
+                            "lost or the lane downgraded. Halcyon "
+                            "is GPU-only; exiting.\n",
+                            (int)pr, hal_platform_gl_reason_text(
+                                         frame.platform));
+                    audit_exit_code = 6;
+                    break;
+                }
                 frame.presented_once = true;
                 frame.need_redraw = false;
             }
         }
 
         if (gpu_info && frame.presented_once) {
-            hal_render_backend backend = HAL_RENDER_BACKEND_UNKNOWN;
-            hal_window_get_render_backend(frame.window, &backend);
-            const char *bname =
-                backend == HAL_RENDER_BACKEND_CPU
-                    ? "CPU"
-                    : (backend == HAL_RENDER_BACKEND_VULKAN
-                           ? "Vulkan"
-                           : (backend == HAL_RENDER_BACKEND_OPENGL
-                                  ? "OpenGL"
-                                  : "unknown"));
-            printf("gpu-info: backend=%s device=%s\n", bname,
-                   hal_window_render_device(frame.window));
+            char info[256];
+            hal_platform_gl_info_text(hal_app_platform(frame.app),
+                                      info, sizeof info);
+            const hal_gl_stats *st = hal_app_gl_stats(frame.app);
+            printf("gpu-info: %s\n", info);
+            printf("gpu-info: %s\n",
+                   hal_platform_gl_reason_text(
+                       hal_app_platform(frame.app)));
+            printf("gpu-info: loader=%s msaa=%d timer=%s\n",
+                   hal_gl_loader_backend(), st ? st->samples : 0,
+                   (st && st->gpu_timer_ok) ? "yes" : "no");
             fflush(stdout);
+            hal_app_quit(frame.app);
+        }
+
+        if (bench_target > 0 && frame.presented_once) {
+            int rc = hal_app_run_bench(frame.app, frame.surface,
+                                       bench_target);
+            audit_exit_code = rc == 0 ? 0 : 4;
+            hal_app_quit(frame.app);
+        }
+
+        if (gl_readback_test && frame.presented_once) {
+            int rc = hal_app_run_gl_readback_test(frame.app,
+                                                  frame.surface);
+            audit_exit_code = rc == 0 ? 0 : 5;
             hal_app_quit(frame.app);
         }
 

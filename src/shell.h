@@ -35,6 +35,12 @@ void hal_app_bump_gpu_serial(hal_app *app);
 /* The CPU raster viewport — the reference oracle for the GL
  * renderer's readback tests. Never called at runtime. */
 void hal_app_paint_viewport_cpu(hal_app *app, hal_canvas *canvas);
+
+/* make bench: N-triangle frame times. 0 = pass. */
+int hal_app_run_bench(hal_app *app, hal_surface *surface, long target);
+
+/* STEP-3 readback: analytic + CPU-oracle silhouette. 0 = pass. */
+int hal_app_run_gl_readback_test(hal_app *app, hal_surface *surface);
 void hal_app_destroy(hal_app *app);
 
 /* True when the user asked to quit (menu, shortcut, window close). */
@@ -48,7 +54,13 @@ bool hal_app_handle_event(hal_app *app, const hal_event *event);
 /* One frame: resize handling, autosave, and the full repaint onto
  * `surface`. Call from the frame loop when the UI is dirty or the
  * viewport animates. */
-void hal_app_paint(hal_app *app, hal_surface *surface);
+hal_result hal_app_paint(hal_app *app, hal_surface *surface);
+
+/* Per-iteration GPU serial upkeep (see shell.c). */
+void hal_app_gpu_frame_tick(hal_app *app, int events_dispatched);
+
+hal_platform *hal_app_platform(hal_app *app);
+const struct hal_gl_stats *hal_app_gl_stats(hal_app *app);
 
 /* STEP-2 audit: paints with the text/popup audit overlay (every
  * draw_text ink rect vs the clip stack, every popup vs its widest
