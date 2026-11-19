@@ -9,202 +9,203 @@ is not edited from here.)
 
 Format: `R-### status — title`.
 
+**2026-11-19 — EVERY REQUEST ANSWERED.** FDK's owner pulled the
+requests file, fixed all six on FDK `main` (commit `3414d94`,
+"Halcyon's FDK requests, session 7/8: all six answered"), and
+withdrew the 1.0.0 re-release the defects shipped in (release and
+tag deleted; FDK is a development version again — build from
+`main`). Statuses below are updated accordingly; each entry names
+what changed and what Halcyon should do about it.
+
+A note on numbering: this file historically carried TWO different
+"R-002" entries (the text-rasterization API and the frame-callback
+argument order). The entries are renumbered into one clean
+sequence below; the original numbers are kept in the titles as
+aliases so old notes still resolve.
+
 ---
 
-## R-001 open (revised 2026-11-18, session 6) — ext-surface GL usable on the X11 backend (or a Wayland-enabled build)
+## R-001 ANSWERED (fixed on FDK main, 2026-11-19) — ext-surface GL usable on the X11 backend
 
-The 1.0.0 extension API IS the GPU draw path (fdk_extend.h:992-1014:
-fdk_ext_gl_make_current / set_frame_callback / swap / fences, plus
-fdk_texture for CPU-pixel compositing and FDK_RENDER_GPU). The
-sub-rect API originally sketched here is not needed and is withdrawn.
-What is still needed to USE it from Halcyon:
+The ask (revised 2026-11-18, session 6): fill the adopted window's
+GL vtable slot on X11 — `fdk_ext_gl_make_current` /
+`fdk_ext_gl_set_frame_callback` answered `FDK_ERR_UNSUPPORTED`
+even with the lane loaded (`FDK_EXT_CAP_GL` true via
+`FDK_GL_FORCE=1` and a GPU-mode probe window).
 
-1. On X11, fdk_ext_gl_make_current and fdk_ext_gl_set_frame_callback
-   answer FDK_ERR_UNSUPPORTED even with the lane loaded
-   (FDK_EXT_CAP_GL true via FDK_GL_FORCE=1 and a GPU-mode probe
-   window). The adopted window's GL vtable slot is never filled by
-   the X11 backend. Ask: fill it (GLXWindow on the adopted xid +
-   the shared lane context), or document ext GL as Wayland-only.
-2. The installed build has no Wayland backend at all (ldd: only
-   libX11; FDK_PLATFORM_WAYLAND -> FDK_ERR_NO_DISPLAY). Ask: a
-   build with Wayland enabled, if the Wayland path is the answer.
+**Fixed.** Root cause: an adopted extension window never acquires a
+framebuffer through the engine, so nothing ever attached the lane —
+`pw->gl_win` stayed NULL and every ext GL op refused. Both
+backends' `window_gl_make_current` and `window_gl_set_frame_cb`
+now attach the lane on demand through the same engage machinery a
+normal window gets (lane load, context, shared root, core-profile
+app context; `fdk_x11_gl_window_try_init` is xid-agnostic, and the
+Wayland twin got the identical fix). An engage failure still
+returns the honest per-reason refusal.
 
-Below is the original API survey (kept for reference).
+**Halcyon action:** drop no workarounds — the ext GL calls now
+engage on first use. `fdk_ext_gl_make_current(surface)` /
+`fdk_ext_gl_set_frame_callback(...)` on the adopted X11 window
+work as documented.
 
-**Deleted as a request.** FDK 1.0.0 already ships a real GPU draw
-path; the earlier "blocked on FDK" reading was wrong. What FDK does
-NOT have is a GL *sub-rect* of a normal fdk_window — but it does not
-need one for Halcyon: the extension-surface GL lane runs the whole
-editor window on the GPU, with the UI composited via fdk_texture.
-The API actually used (paths + line numbers from the installed
-headers, /home/z/my-project/fdk-install/include/fdk/):
+## R-002 ANSWERED (fixed on FDK main, 2026-11-19) — text rasterization into caller-owned memory (original R-002)
 
-- fdk_extend.h:992-1014 — "GL for add-ons (P2: a real API, not a
-  recipe)": fdk_ext_gl_make_current(surface),
-  fdk_ext_gl_set_frame_callback(surface, fn, user),
-  fdk_ext_gl_swap, fdk_ext_gl_fence_insert/wait. The callback runs
-  from FDK's frame scheduling with the OWNING window's lane GL
-  context CURRENT on the surface's native drawable: draw, return,
-  FDK swaps. "The callback replaces the paint engine for that
-  window's buffer — software content rides fdk_texture if mixed."
-- fdk_extend.h:162-171 — FDK_EXT_CAP_GL: the EGL/GLX presentation
-  lane actually initialized (hardware GL, not a refused software
-  renderer).
-- fdk_extend.h:285-353 — fdk_ext_register_kind +
-  fdk_ext_surface_create: the add-on's create callback builds the
-  native surface (X11: XCreateWindow; Wayland: wl_compositor +
-  role), FDK adopts it and routes the full fdk_event_data stream
-  (configure, expose, focus, pointer, keys, close).
-- fdk_surface.h:661-681 — fdk_texture_create/update/draw/destroy:
-  app-owned RGBA pixels composited into any fdk_surface in EVERY
-  render mode; in GPU mode "uploads into the window's lane context
-  at draw time (cached per texture) and draws as a batched-machinery
-  quad".
-- fdk_core.h:53-79 — FDK_RENDER_GPU: the lane is REQUIRED; the
-  classic framebuffer path is disabled; window creation FAILS
-  (FDK_ERR_UNSUPPORTED) if the GL stack cannot initialize — "never a
-  silent fallback". Selected via fdk_init_options.render_mode or
-  FDK_RENDER=gpu.
+The ask: rasterize a glyph or line into an application-owned ARGB
+buffer instead of onto an fdk_surface — cached label textures,
+viewport overlay sprites, the curve editor's axis-label atlas.
 
-Minimal shape (as used in src/platform/gpu_window.c):
+**Shipped.** `fdk_font_rasterize_utf8` (include/fdk/fdk_text.h):
+the same shaped placement walk `fdk_surface_draw_utf8` uses
+(identical shaping, kerning, fallbacks, glyph cache — results agree
+pixel-for-pixel with on-surface draws), blended into caller-owned
+ARGB8888 memory. Signature as shipped (the sketch grew a `color`
+and a `baseline_y` — tint and vertical placement were the two
+things the sketch could not express):
 
-    fdk_init(&ctx, &(fdk_init_options){ .app_id = ..., .render_mode =
-        FDK_RENDER_GPU });
-    fdk_ext_register_kind(ctx, "halcyon-editor", &ops, app, &kind);
-    fdk_ext_surface_create(kind, &surf);        /* create cb: XCreateWindow */
-    fdk_ext_gl_set_frame_callback(surf, frame, app);  /* lane ctx current */
-    /* frame(): GL draws the 3D scene, then
-       fdk_texture_draw(render_target, ui_texture, rect) composites
-       the CPU-painted UI; FDK swaps. */
-
-## R-002 open — text rasterization into caller-owned memory
-
-**What.** Rasterize a glyph (or a line) into an application-owned
-ARGB buffer instead of directly onto an fdk_surface.
-
-**Why.** Halcyon's UI composites text in places where there is no
-surface yet (cached label textures, viewport overlay sprites, the
-future curve editor's axis labels in an offscreen atlas). Today
-Halcyon works around it by drawing text onto a temporary offscreen
-surface through the wrapper and copying — correct but double-handled.
-
-**Status.** Not blocking: the offscreen-surface workaround is clean
-and tested. Recorded because it is the natural next text API
-(FDK's own "unstable tier" queue mentions per-glyph shaping and raw
-framebuffer access as queued candidates).
-
-**Proposed API (sketch).**
 ```c
-typedef struct { int x0,y0,x1,y1; } fdk_glyph_box;
 fdk_result fdk_font_rasterize_utf8(const fdk_font *font,
-                                   const char *utf8, size_t len,
-                                   fdk_u32 *dst, int w, int h,
-                                   int stride, fdk_glyph_box *out);
+                                   const char *utf8, size_t byte_len,
+                                   fdk_color color, fdk_u32 *dst,
+                                   fdk_i32 w, fdk_i32 h,
+                                   fdk_i32 stride_bytes,
+                                   fdk_i32 baseline_y,
+                                   fdk_rect *out_ink);
 ```
-**Fallback.** Offscreen surface + copy (in use today).
 
-## GPU viewport path (requested 2026-11-18, Halcyon session 3)
+Straight source-over including the destination alpha; the buffer is
+the clip; `out_ink` returns the painted region (empty box = no
+ink). No surface, no context, no display. Twelve-leg test in FDK's
+suite (`tests/test_font_rasterize.c`: NULL contracts, ink-in-box,
+tint, tiny-buffer clipping, whitespace).
 
-Halcyon's viewport rasterizes on the CPU (see docs/performance.md:
-~73 fps at 100k triangles single-threaded at 1280x720 on a slow
-sandbox — fine for v0.1, but texture sampling and antialiasing will
-raise the per-pixel cost). Requested, in preference order:
+**Halcyon action:** the offscreen-surface + copy workaround can be
+retired for new code when building against FDK main.
 
-1. A window-system-backed GPU surface (Vulkan preferred, OpenGL ES
-   acceptable) that `hal_surface` can wrap, so Halcyon can hand the
-   rasterizer's output — or ideally render — on the GPU.
-2. Even without a full GPU API: a blit path that uploads a CPU
-   framebuffer as a texture (zero-copy when possible) — this alone
-   removes the final CPU copy from the present path.
-3. Shader-adjacent primitives are NOT needed; Halcyon's rasterizer
-   already computes shading, UVs, skinning and texturing and would
-   only need the surface/blit layer.
+## R-003 ANSWERED (fixed on FDK main, 2026-11-19) — ext GL frame callback invoked with swapped arguments (original duplicate R-002, session 7)
 
-Use case: viewport interactivity at 200k+ triangles with bilinear
-texturing on mid-range hardware (Intel i5-8400 class).
+The ask: `fdk_ext_gl_frame_fn` is declared `(surface, user)` but
+the X11 present arbitration invoked it as `fn(user, surface)`;
+Halcyon's trampoline matched the REAL order and needed the swap
+undone at the source.
 
+**Fixed.** All four invocation sites (X11 `cb_flush` +
+`cb_readback`, Wayland `cb_flush` and its readback twin) now call
+`fn(surface, user)` per the header. The swap-symmetric draws that
+hid this are exactly why the counting-callback proof mattered.
+
+**Halcyon action:** remove `hal_gpu_frame_trampoline`'s reversed
+argument shuffle — the callback now receives the DOCUMENTED order
+when building against FDK main.
+
+## R-004 ANSWERED (fixed on FDK main, 2026-11-19) — the fdk_gl_viewport widget composites UNDER the CPU frame on X11 (original R-003, session 7)
+
+The ask: the widget's GL content was never visible — the lane's
+present drew a fullscreen CPU quad over the back buffer after the
+tree walk ran the render callback; pixel-proven twice
+(server-side XGetImage); tests only pinned the reason enum.
+
+**Fixed, with the pixel proof the widget never had.** The widget
+now reads the region back right after the application's render
+callback (a new `window_gl_read_region` platform op, implemented on
+both backends through the lane's own `glReadPixels`) and composites
+it into the CPU surface as an ordinary opaque sprite IN PAINT
+ORDER: later siblings (menus, popups, tooltips) paint after the
+viewport in the walk and therefore draw OVER it — the documented
+promise, now actually true. FDK's test suite grew the pixel leg:
+under Xvfb + llvmpipe + `FDK_GL_FORCE=1`, a callback that clears to
+a known color must show that color in the window's own CPU surface
+(`tests/test_gl_viewport.c`, "R-003: GL region composites into the
+frame (paint order)").
+
+**Halcyon action:** none required — Halcyon stayed on the
+ext-surface frame callback (present arbitration), which remains the
+right shape for a whole-window GPU editor. The widget is now a
+legitimate option for embedded regions.
+
+## R-005 ANSWERED (documented on FDK main, 2026-11-19) — GL_UNSIGNED_BYTE index draws silently rasterize nothing on llvmpipe core (original R-004, session 7)
+
+The ask: `glDrawElements(GL_UNSIGNED_BYTE, ...)` on the llvmpipe
+core 4.5 context draws NOTHING and reports NO error; SHORT/INT
+work. A spec-legal byte-index path fails silently for other
+add-ons too.
+
+**Answered honestly: this is driver-side and unfixable in FDK**
+(FDK's own drawing never uses indices — the present path is an
+unindexed fullscreen quad). The limitation is now documented in
+`fdk_gl.h`'s app-context contract ("Known driver quirks in the app
+context"): applications drawing through the app context should
+index with `GL_UNSIGNED_SHORT` or `GL_UNSIGNED_INT`; the byte-index
+path is unreliable on at least Mesa's software rasterizer.
+
+**Halcyon action:** none — Halcyon's renderer already uses
+UNSIGNED_INT everywhere (this request was filed for other add-ons'
+sake).
+
+## R-006 ANSWERED (fixed on FDK main, 2026-11-19) — a Wayland-backend FDK build + the GPU window's Wayland kind (original R-005, session 7)
+
+The ask: a Wayland-enabled FDK build (the installed build was
+X11-only; `FDK_PLATFORM_WAYLAND` -> `FDK_ERR_NO_DISPLAY`), plus
+weston/sway in the test rig and xdg-shell bindings to finish
+Halcyon's Wayland ext-surface kind.
+
+**Answered in two parts.**
+
+1. *The channel guarantee:* FDK's release workflow now GATES on
+   the Wayland backend — the release fails loudly if
+   `libfdk.so.1` does not NEEDED-link `libwayland-client` (the
+   build job already installs `libwayland-dev` +
+   `libxkbcommon-dev`, and the Makefile's auto-detection builds
+   Wayland whenever those are visible). An X11-only bundle can no
+   longer ship silently.
+2. *The loader crash that made the Wayland path untestable:* see
+   R-007 — with it fixed, `fdk_init` + the first
+   `fdk_window_create` on a GPU-mode Wayland session no longer
+   SEGV, and Halcyon's `HALCYON_BACKEND=wayland` opt-in can be
+   exercised against the staged weston rig (`scripts/wl-env.sh`).
+
+**Halcyon action:** build FDK from `main` (or the next release,
+which will carry the backend gate); finish the Wayland ext-surface
+kind against the weston rig when ready.
+
+## R-007 ANSWERED (fixed on FDK main, 2026-11-19) — Wayland EGL lane loader crashes: eglGetProcAddress CALLED before it is resolved (original R-006, session 8)
+
+The ask: `fdk_wayland_egl_try_load`'s app-context block called
+`egl->fn.eglGetProcAddress("eglBindAPI")` ~20 lines BEFORE
+`EGL_RESOLVE(eglGetProcAddress, ...)` filled the field — NULL
+deref, SEGV with pc=0, deterministic for EVERY GPU-mode window on
+Wayland; reproduced under headless weston and matching a real
+desktop report frame-for-frame. The fix was a two-line move.
+
+**Fixed exactly as asked.** `eglGetProcAddress` is now resolved
+FIRST (before the app-context block), and `eglBindAPI` gained a
+`dlsym` fallback alongside the loader lookup (it is a direct
+export of every EGL 1.2+ loader, so the fallback is not merely
+theoretical).
+
+**Halcyon action:** remove the forced `FDK_PLATFORM_X11` (XWayland)
+workaround in `src/platform/platform.c` when building against FDK
+main — `$WAYLAND_DISPLAY` sessions can use the native backend
+again (`HALCYON_BACKEND` keeps working as the explicit override).
 
 ---
 
-## R-002 open (2026-11-19, session 7) — ext GL frame callback invoked with swapped arguments
+## The GPU viewport path note (requested 2026-11-18, Halcyon session 3)
 
-fdk_extend.h declares `fdk_ext_gl_frame_fn` as
-`void (*)(fdk_ext_surface *surface, void *user)`, but the X11 present
-arbitination (fdk_x11_window_gl_set_frame_cb stores fn+user; cb_flush
-calls `fn(user, surface)`) invokes it as fn(user, surface) — the
-documented parameter order is swapped at the call site. Halcyon's
-trampoline (src/platform/platform.c, hal_gpu_frame_trampoline) matches
-the REAL order; swap back when FDK fixes the invocation. Proof: a
-callback compiled to the declared order saw its counter stay 0 across
-200 invocations while the swap-symmetric draws still ran.
+The original preference-ordered request (a window-system-backed
+GPU surface for `hal_surface`, or at least a CPU-framebuffer blit
+path) was satisfied by the 1.0.0 extension API itself — the
+ext-surface GL lane runs the whole editor window on the GPU with
+the UI composited via `fdk_texture`, and Halcyon's renderer keeps
+its CPU rasterizer for content that needs it. With R-001/R-003/R-007
+fixed, that path works on both backends. No further ask.
 
-## R-003 open (2026-11-19, session 7) — the fdk_gl_viewport widget composites UNDER the CPU frame on X11
+## Withdrawal context (2026-11-19)
 
-fdk_gl.h promises the GL viewport widget's region composites in the
-tree's paint order with "menus, popups and tooltips that overlap the
-region draw OVER it". On FDK 7fbba8a/X11 the widget's GL content is
-never visible at all: the lane's present draws a fullscreen CPU quad
-(draw_fullscreen_quad) over the back buffer AFTER the tree walk ran
-the widget's render callback, and nothing excludes the widget's
-region. Pixel-proven twice (server-side XGetImage): the widget
-example's animated clear and a constant-red callback clear both
-invisible — the region shows the widget's CPU fill box (15,18,23).
-tests/test_gl_viewport.c only pins the reason enum/engage identity,
-not pixels. Halcyon therefore uses the ext-surface GL frame callback
-(present arbitration) instead, which pixel-verified end to end.
-
-## R-004 open (2026-11-19, session 7) — GL_UNSIGNED_BYTE index draws silently rasterize nothing on llvmpipe core
-
-glDrawElements(GL_TRIANGLES, n, GL_UNSIGNED_BYTE, ...) on the
-llvmpipe core 4.5 context (via the engaged lane) draws NOTHING and
-reports NO error; GL_UNSIGNED_SHORT and GL_UNSIGNED_INT work. Found
-by the session's spike (half-window triangle invisible, fullscreen
-quad fine). Halcyon's renderer uses UNSIGNED_INT everywhere; a
-spec-legal byte-index path would fail silently for other add-ons too.
-
-## R-005 open (2026-11-19, session 7) — a Wayland-backend FDK build + the GPU window's Wayland kind
-
-Halcyon's ext-surface window kind implements the X11 create path
-(XCreateWindow via the documented native display handle). The
-Wayland path (wl_compositor surface + an xdg_toplevel role through
-the add-on's own registry) is sketched in the code but REFUSED
-honestly: this sandbox has no Wayland compositor and FDK was built
-X11-only (FDK_DISABLE_WAYLAND auto). To finish it: a Wayland-enabled
-FDK build, weston/sway in the test rig, and the generated
-xdg-shell-client protocol bindings.
-
-
----
-
-## R-006 open (2026-11-19, session 8) — Wayland EGL lane loader crashes: eglGetProcAddress CALLED before it is resolved
-
-`src/platform/wayland/wayland_egl.c`, `fdk_wayland_egl_try_load`:
-the 1.0.0 app-context block at line ~874 calls
-
-    egl->fn.eglGetProcAddress("eglBindAPI")
-
-but `eglGetProcAddress` is only resolved into that table ~20 lines
-later by `EGL_RESOLVE(eglGetProcAddress, "eglGetProcAddress")` (line
-~894). At the call the field is still NULL: `call 0x0`, SEGV with
-pc=0. This is deterministic for EVERY GPU-mode window on the Wayland
-backend — `fdk_init(FDK_RENDER_GPU)` succeeds, then the first
-`fdk_window_create` (or any lane load) crashes inside FDK.
-
-Reproduced under headless weston (kiosk shell, xdg_wm_base bound),
-symbolized from the fault-time stack: [rsp+0] returns into
-fdk_wayland_egl_try_load at wayland_egl.c:877-878. A user report on
-a real desktop Wayland session matches frame-for-frame (libfdk.so.1
-+0x4e258/+0x56b3a, pc=0, called from fdk_window_create).
-
-The fix is a two-line move: resolve `eglGetProcAddress` (and
-`eglBindAPI`'s dlsym fallback) BEFORE the app-context block uses it.
-
-Halcyon's workaround (src/platform/platform.c): on a Wayland session
-($WAYLAND_DISPLAY set) Halcyon now inits FDK with
-fdk_init_options.backend = FDK_PLATFORM_X11 (XWayland) and prints a
-loud notice naming this request; HALCYON_BACKEND=wayland opts into
-the Wayland backend anyway (for testing once FDK ships the fix);
-HALCYON_BACKEND=x11 forces. GPU-only is preserved — this is a
-backend choice, never a render-path fallback. Once R-006 is fixed,
-the Wayland ext-surface kind (R-005) can be built and tested against
-the staged weston rig (scripts/wl-env.sh).
+The 1.0.0 re-release that shipped the six defects above has been
+withdrawn by FDK's owner: the release and its tag are deleted, the
+CHANGELOG carries a 2026-11-19 withdrawal record naming these
+requests, and FDK is a development version again (build from
+`main`; the packaging channel stays wired and will re-cut when the
+owner says so). Halcyon should treat FDK `main` post-`3414d94` as
+the fixed baseline and expect the next numbered release to carry
+all of the above.

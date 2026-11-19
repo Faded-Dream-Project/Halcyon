@@ -16,3 +16,9 @@ leak:libEGL_mesa
 
 # Xlib's display/connection caches.
 leak:libX11
+
+# ASan's own internal bookkeeping (an allocation whose caller is
+# INSIDE libasan.so — the runtime allocating through its own calloc
+# intercept; seen once on the Wayland lane path, 2696 bytes). Not
+# application code; suppressing by module is exact.
+leak:libasan

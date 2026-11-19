@@ -90,15 +90,26 @@ start-to-export walkthrough. Keyboard map: docs/shortcuts.md.
 - Single-threaded rasterizer; no GPU path yet (requested from FDK in
   docs/FDK-REQUESTS.md).
 
-### Backend policy (Wayland sessions)
+### Backends: X11 and native Wayland
 
-FDK 7fbba8a's Wayland EGL lane crashes at load (see
-docs/FDK-REQUESTS.md R-006), so Halcyon defaults to the X11 backend
-(XWayland) whenever `$WAYLAND_DISPLAY` is set, with a notice on
-stderr. `HALCYON_BACKEND=wayland` opts into the Wayland backend
-(usable once FDK fixes R-006); `HALCYON_BACKEND=x11` forces X11.
-The GPU-only viewport runs on either backend; there is no CPU
-fallback anywhere.
+The ext-surface kind builds a native window on BOTH backends: an
+X11 window on X sessions, and a `wl_surface` + `xdg_toplevel` role
+(through FDK's raw-event queue add-on API) on Wayland sessions —
+the GPU-only viewport runs on either. `HALCYON_BACKEND=wayland` or
+`=x11` forces a backend (default: auto). Building against FDK main
+(post-3414d94) requires `libwayland-dev` — the same requirement an
+FDK build has; the generated xdg-shell protocol code is committed
+under `src/platform/` so `wayland-protocols` is not needed.
+
+Wayland notes: a hidden GL probe window cannot exist there (a
+Wayland window has no size until its first configure), so the GL
+verdict and the `--gpu-info` identity are read at the FIRST window
+through the engaged context; window titles ride the xdg_toplevel
+role; `hal_window_resize` is an honest no-op (Wayland sizes are
+compositor-driven). Tested under headless weston (kiosk shell) +
+llvmpipe: smoke, z-order, entries, ui-audit, and a leak-clean
+teardown all pass; real-seat input and server-side pixel proofs
+need a compositor with a seat (not in this rig).
 
 ### FDK requirement
 

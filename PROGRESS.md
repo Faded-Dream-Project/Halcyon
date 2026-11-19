@@ -44,6 +44,65 @@
 
 ## Current state
 
+**SESSION 9 (2026-11-19) — FDK answered EVERY request (3414d94);
+Halcyon recloned against it, all workarounds retired, and the
+NATIVE WAYLAND WINDOW KIND SHIPPED AND TESTED; both backends green;
+pushed.**
+
+- FDK main at 8ecd83f (fixes 3414d94 on top of 7fbba8a): R-001 ext
+  GL engages on adopted windows, R-002 fdk_font_rasterize_utf8
+  shipped, R-003 frame callback (surface,user) order fixed, R-004
+  the GL viewport widget composites in paint order, R-005 byte-index
+  quirk documented, R-006 the release gates on Wayland linkage,
+  R-007 the Wayland lane loader crash fixed. The 1.0.0 re-release
+  was withdrawn; build FDK from main. docs/FDK-REQUESTS.md now
+  carries the answered statuses (the owner's filled file).
+- Halcyon retired its workarounds: the frame-callback trampoline
+  matches the documented order; the forced-X11 backend default is
+  GONE (auto again, HALCYON_BACKEND overrides). R-001/R-002 had no
+  Halcyon workarounds to retire (text goes through on-surface
+  draws; fdk_font_rasterize_utf8 is for FUTURE texture code).
+- THE WAYLAND KIND: src/platform/platform.c builds the wl_surface +
+  xdg_toplevel role through FDK's raw-event queue (fdk_wl_queue_*,
+  the f-session-lock-raw.c pattern): private registry on a private
+  queue attached to the pump, wl_compositor + xdg_wm_base bound by
+  name, configure acked + reported via fdk_ext_surface_notify_
+  configure (0-size = the requested size), xdg_toplevel::close
+  delivered as HAL_EVENT_WINDOW_CLOSE_REQUEST, raw-bound proxies
+  destroyed at shutdown (LSan caught the 2x96-byte wl_proxy leak
+  before it shipped). Generated xdg-shell code committed under
+  src/platform/ (no wayland-protocols build dep).
+- The GL probe is now X11-only BY DESIGN: a hidden Wayland window
+  never configures (pixel_area 0 vs the 131072-px gate). On Wayland
+  the verdict + --gpu-info identity move to the FIRST window (the
+  lane engages on demand at the ext surface — R-001's fix; identity
+  read via fdk_ext_gl_make_current + glGetString; flavor/vendor/
+  renderer/version parsed from the live context).
+- BONUS FIX: hal_window_set_title/resize were silently no-ops on X11
+  (win->xid never assigned) — both now query the live native handle
+  (fdk_ext_surface_native); title also rides the xdg_toplevel on
+  Wayland; resize is an honest documented no-op there.
+- The rig: glvnd needed __EGL_VENDOR_LIBRARY_DIRS (double
+  underscore!) pointed at the staged mesa vendor json — the Wayland
+  EGL stack now runs under headless weston. wl-env.sh carries it.
+- TESTED under weston kiosk + llvmpipe, native Wayland end to end:
+  --smoke PASS (1280x800 painted+presented, viewport 964x684),
+  --test-zorder PASS (panel 90513 px, 0 viewport-bg, command ran),
+  --test-entries PASS (7/7), --ui-audit 0 violations at 1920x1080,
+  --gpu-info reads through the engaged context (gles2-flavor
+  context is the Wayland lane's documented fallback), teardown
+  LEAK-CLEAN (the asan-internal allocation suppressed by module).
+  NOT testable in this rig: real-seat input (kiosk weston has no
+  wl_seat), server-side pixel proofs (an X11 concept).
+- X11 regression after all changes: headless suite + FULL display
+  tier green (0 FAILs; audits 0 violations at 1x/2x scales).
+- Known-broken unchanged: --bench 100000 (scene-teardown UAF),
+  --test-gl-readback (exit 5, the in-callback hook stays
+  next-session work), gpu-info's "loader=glX" label is cosmetic on
+  Wayland (the loader resolved glX entry points; the LIVE context
+  is the lane's EGL one).
+
+
 **SESSION 8 (2026-11-19) — the user's Wayland startup SEGV diagnosed
 to an exact FDK bug (R-006) and worked around; every suite green;
 pushed.**

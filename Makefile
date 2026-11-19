@@ -37,7 +37,7 @@ ifeq ($(strip $(FDK_LIBS)),)
 $(error FDK not found via pkg-config. Build and install FDK first (github.com/Faded-Dream-Project/FDK, `make install`), and make sure PKG_CONFIG_PATH can see fdk.pc.)
 endif
 
-CFLAGS  := $(STD) $(WARN) $(FEATURE) $(CONFIG_FLAGS)
+# CFLAGS is assembled below, after the backend flag blocks
 # rpath: binaries find a workspace-local FDK install without exported
 # LD_LIBRARY_PATH (an /usr/local install makes the rpath a no-op).
 # FDK_LIBDIR is nonempty by construction — the FDK check above already
@@ -46,7 +46,14 @@ FDK_LIBDIR := $(shell pkg-config --variable=libdir fdk)
 # X11: the ext-surface window creation (FDK's documented add-on
 # pattern includes the native headers); GL stays dlopen-only.
 X11_LIBS := $(shell pkg-config --libs x11 2>/dev/null || echo -lX11)
-LDFLAGS := $(FDK_LIBS) $(X11_LIBS) -lm -Wl,-rpath,$(FDK_LIBDIR)
+# Wayland: the kind's native xdg_toplevel role (raw-event queue add-on
+# pattern). FDK's release gate guarantees libwayland-client at runtime
+# wherever FDK itself runs; a build box needs libwayland-dev — the
+# same requirement an FDK build has.
+WAYLAND_CFLAGS := $(shell pkg-config --cflags wayland-client 2>/dev/null)
+WAYLAND_LIBS := $(shell pkg-config --libs wayland-client 2>/dev/null || echo -lwayland-client)
+CFLAGS := $(STD) $(WARN) $(FEATURE) $(CONFIG_FLAGS) $(WAYLAND_CFLAGS)
+LDFLAGS := $(FDK_LIBS) $(X11_LIBS) $(WAYLAND_LIBS) -lm -Wl,-rpath,$(FDK_LIBDIR)
 
 # ---- Sources ----
 # src/platform is compiled with the FDK include path; every other module
