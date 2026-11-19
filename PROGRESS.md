@@ -44,6 +44,19 @@
 
 ## Current state
 
+**SESSION 7 (2026-11-19) — FDK updated to 7fbba8a; Halcyon builds
+and runs against it.** The user's machine failed to build commit
+d2203c7 because it calls `fdk_window_get_render_backend` /
+`fdk_window_render_device`, which exist only in FDK 7fbba8a+ — the
+sandbox's old prebuilt FDK happened to have them, so it built here.
+The workspace now clones FDK at 7fbba8a (/home/z/my-project/FDK),
+builds it (`make release PREFIX=.../fdk-install` with the staged
+Xrandr dev libs in xdev-pkgs), and Halcyon builds clean against the
+new install: headless suite green, --smoke paints and presents.
+Minimum FDK commit recorded in README.md. The old "GPU viewport
+blocked on FDK" verdict is obsolete: FDK now ships fdk_gl.h (see the
+next entry for the API survey).
+
 **SESSION 6 (2026-11-18) — steps 1a/1b fixed and regression-tested;
 STEP 2 STOPPED on FDK-build evidence; --gpu-info added.** The full
 account is in the log entries below; the short form:

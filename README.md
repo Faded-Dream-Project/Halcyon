@@ -90,6 +90,16 @@ start-to-export walkthrough. Keyboard map: docs/shortcuts.md.
 - Single-threaded rasterizer; no GPU path yet (requested from FDK in
   docs/FDK-REQUESTS.md).
 
+### FDK requirement
+
+Halcyon builds against **FDK commit `7fbba8a` or newer** (main of
+https://github.com/Faded-Dream-Project/FDK) — the first release with
+`include/fdk/fdk_gl.h` (the app-owned GL API: `fdk_window_gl_engage`,
+`fdk_gl_viewport_*`, `fdk_gl_status`). `pkg-config --modversion fdk`
+must resolve to that install. Older FDK builds fail at link time on
+`fdk_window_get_render_backend` / `fdk_window_render_device` /
+`fdk_gl_*`.
+
 ## Building
 
 Requirements:
