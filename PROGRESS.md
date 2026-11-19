@@ -44,6 +44,46 @@
 
 ## Current state
 
+**SESSION 8 (2026-11-19) — the user's Wayland startup SEGV diagnosed
+to an exact FDK bug (R-006) and worked around; every suite green;
+pushed.**
+
+- The user ran ./build/halcyon on their Wayland desktop: FDK picked
+  the wayland backend and SEGV'd at pc=0 inside fdk_window_create
+  (their stack: libfdk +0x4e258/+0x56b3a, platform.c:366 = the
+  hidden GL probe's fdk_window_create).
+- Sandbox Wayland environment BUILT from scratch: FDK rebuilt WITH
+  the Wayland backend (staged libwayland/libEGL dev packages), a
+  headless weston 14 rig (kiosk shell provides xdg_wm_base; full dep
+  staging + WESTON_MODULE_MAP in scripts/wl-env.sh), and the crash
+  REPRODUCED exactly. Symbolized via a fault-time stack dump
+  (SIGSEGV handler + [rsp] return address + addr2line against a -g
+  FDK build): fdk_wayland_egl_try_load, wayland_egl.c:874 calls
+  egl->fn.eglGetProcAddress BEFORE EGL_RESOLVE fills it at :894 — a
+  NULL call every GPU-mode Wayland window hits. FDK-REQUESTS R-006
+  with the two-line fix.
+- Halcyon's workaround (platform.c): Wayland session => init FDK on
+  the X11 backend (XWayland) with a LOUD notice naming R-006;
+  HALCYON_BACKEND=wayland/x11 override. GPU-only preserved (a
+  backend choice, not a render fallback). Verified three ways under
+  the rig: wayland-only = notice + clean exit (no SEGV); wayland+X
+  (the user's XWayland case) = notice + the GPU viewport RUNS
+  (--smoke passes); plain X11 = unchanged. On the user's machine
+  Halcyon should now start and run the GPU viewport through XWayland
+  — please report if it does not.
+- The z-order e2e server-probe block is REMOVED (it re-presented
+  with a stale menubar pointer after File>New rebuilt the UI — the
+  use-after-free behind last session's tier exit 2). The in-callback
+  readback hook + a correct server probe remain next-session work.
+- Suites: headless all green; the FULL display tier green again
+  (z-order PASS: panel 90513 px, 0 viewport-bg, input priority
+  proven). The known-broken list from session 7 shrinks to:
+  --bench 100000 (scene-teardown ASan crash) and
+  --test-gl-readback (exit 7, hook not wired).
+- FDK main is still 7fbba8a (checked; no upstream fix). Halcyon is
+  synced to origin/main before this session's work, as asked.
+
+
 **SESSION 7 (2026-11-19) — the GPU-ONLY viewport is LIVE (pushed
 b6e11b9), the measurement tools landed; three of the newest test
 paths are honestly known-broken and blocked on the next session.**

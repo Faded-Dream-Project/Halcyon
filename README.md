@@ -90,6 +90,16 @@ start-to-export walkthrough. Keyboard map: docs/shortcuts.md.
 - Single-threaded rasterizer; no GPU path yet (requested from FDK in
   docs/FDK-REQUESTS.md).
 
+### Backend policy (Wayland sessions)
+
+FDK 7fbba8a's Wayland EGL lane crashes at load (see
+docs/FDK-REQUESTS.md R-006), so Halcyon defaults to the X11 backend
+(XWayland) whenever `$WAYLAND_DISPLAY` is set, with a notice on
+stderr. `HALCYON_BACKEND=wayland` opts into the Wayland backend
+(usable once FDK fixes R-006); `HALCYON_BACKEND=x11` forces X11.
+The GPU-only viewport runs on either backend; there is no CPU
+fallback anywhere.
+
 ### FDK requirement
 
 Halcyon builds against **FDK commit `7fbba8a` or newer** (main of

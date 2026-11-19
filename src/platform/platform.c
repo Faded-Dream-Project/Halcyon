@@ -347,6 +347,43 @@ hal_result hal_platform_init(const hal_platform_options *options,
      * instead of silently falling back (fdk_core.h:53-79). */
     fdk_opts.render_mode = FDK_RENDER_GPU;
 
+    /* Backend policy (session 8, FDK-REQUESTS R-006): FDK 7fbba8a's
+     * Wayland EGL lane LOADER crashes deterministically —
+     * wayland_egl.c:874 calls egl->fn.eglGetProcAddress before the
+     * EGL_RESOLVE at :894 fills it (NULL call, SEGV pc=0; reproduced
+     * under headless weston, symbolized from the fault-time stack).
+     * Any GPU-mode window on Wayland hits it inside
+     * fdk_window_create. Halcyon therefore DEFAULTS to the X11
+     * backend (XWayland) on Wayland sessions — still the GPU-only
+     * path, never a CPU fallback — with this loud notice.
+     * HALCYON_BACKEND=wayland opts in (for testing once FDK fixes
+     * R-006); HALCYON_BACKEND=x11 forces; auto otherwise. */
+    {
+        const char *be = getenv("HALCYON_BACKEND");
+        bool wl_session = getenv("WAYLAND_DISPLAY") != NULL;
+        if (be != NULL && strcmp(be, "wayland") == 0) {
+            fdk_opts.backend = FDK_PLATFORM_WAYLAND;
+            fprintf(stderr,
+                    "halcyon-gpu: HALCYON_BACKEND=wayland — the "
+                    "Wayland backend. FDK 7fbba8a crashes in its EGL "
+                    "lane loader (R-006); this only works with that "
+                    "fix.\n");
+        } else if (wl_session) {
+            fdk_opts.backend = FDK_PLATFORM_X11;
+            fprintf(stderr,
+                    "halcyon-gpu: Wayland session detected. FDK "
+                    "7fbba8a's Wayland EGL lane crashes at load "
+                    "(FDK-REQUESTS R-006: eglGetProcAddress is "
+                    "CALLED before it is resolved — "
+                    "src/platform/wayland/wayland_egl.c:874 vs "
+                    ":894). Defaulting to the X11 backend (XWayland) "
+                    "— the GPU viewport still runs, GPU-only. Set "
+                    "HALCYON_BACKEND=wayland to try anyway.\n");
+        } else if (be != NULL && strcmp(be, "x11") == 0) {
+            fdk_opts.backend = FDK_PLATFORM_X11;
+        }
+    }
+
     fdk_result r = fdk_init(&p->fdk, &fdk_opts);
     if (!fdk_ok(r)) {
         free(p);

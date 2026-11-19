@@ -172,3 +172,39 @@ honestly: this sandbox has no Wayland compositor and FDK was built
 X11-only (FDK_DISABLE_WAYLAND auto). To finish it: a Wayland-enabled
 FDK build, weston/sway in the test rig, and the generated
 xdg-shell-client protocol bindings.
+
+
+---
+
+## R-006 open (2026-11-19, session 8) — Wayland EGL lane loader crashes: eglGetProcAddress CALLED before it is resolved
+
+`src/platform/wayland/wayland_egl.c`, `fdk_wayland_egl_try_load`:
+the 1.0.0 app-context block at line ~874 calls
+
+    egl->fn.eglGetProcAddress("eglBindAPI")
+
+but `eglGetProcAddress` is only resolved into that table ~20 lines
+later by `EGL_RESOLVE(eglGetProcAddress, "eglGetProcAddress")` (line
+~894). At the call the field is still NULL: `call 0x0`, SEGV with
+pc=0. This is deterministic for EVERY GPU-mode window on the Wayland
+backend — `fdk_init(FDK_RENDER_GPU)` succeeds, then the first
+`fdk_window_create` (or any lane load) crashes inside FDK.
+
+Reproduced under headless weston (kiosk shell, xdg_wm_base bound),
+symbolized from the fault-time stack: [rsp+0] returns into
+fdk_wayland_egl_try_load at wayland_egl.c:877-878. A user report on
+a real desktop Wayland session matches frame-for-frame (libfdk.so.1
++0x4e258/+0x56b3a, pc=0, called from fdk_window_create).
+
+The fix is a two-line move: resolve `eglGetProcAddress` (and
+`eglBindAPI`'s dlsym fallback) BEFORE the app-context block uses it.
+
+Halcyon's workaround (src/platform/platform.c): on a Wayland session
+($WAYLAND_DISPLAY set) Halcyon now inits FDK with
+fdk_init_options.backend = FDK_PLATFORM_X11 (XWayland) and prints a
+loud notice naming this request; HALCYON_BACKEND=wayland opts into
+the Wayland backend anyway (for testing once FDK ships the fix);
+HALCYON_BACKEND=x11 forces. GPU-only is preserved — this is a
+backend choice, never a render-path fallback. Once R-006 is fixed,
+the Wayland ext-surface kind (R-005) can be built and tested against
+the staged weston rig (scripts/wl-env.sh).
